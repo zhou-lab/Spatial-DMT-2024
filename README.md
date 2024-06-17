@@ -11,5 +11,5 @@ Next Generation Sequencing (NGS) NGS was conducted on an Illumina NovaSeq 6000 s
 ### Running Spatial-MT snakemake files
 
 ### Data downstream analysis and visualization
-The data analysis and visualization was completed with R language (4.4.0). 
+The data analysis and visualization were completed with R language (4.4.0). 
 
