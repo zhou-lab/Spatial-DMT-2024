@@ -1,0 +1,373 @@
+---
+title: "QC_Check"
+output: html_document
+date: "2024-06-20"
+---
+
+### Necessary library
+```{r}
+suppressMessages(library(readr))
+suppressMessages(library(tidyr))
+suppressMessages(library(textshape))
+suppressMessages(library(wheatmap))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+```
+
+## knee plot for # of reads
+```{r}
+folder_path <- "~/tmp/Spatial_methseq/trim/"
+datasets <- c("SpMETSLB14DM","SpMETSLE14DM","SpMETSLE17DM")
+spatial_coordinate <- read.table("spatial_barcodes.txt",sep="\t")
+sorted_reads <- c()
+barcodes <- c()
+for (i in 1:length(datasets)){
+  tbl <- read.table(paste0(folder_path,datasets[i],"/",datasets[i],"_barcodes.txt"),sep="\t")
+  tbl$V2 <- as.numeric(tbl$V2)
+  tbl <- tbl %>% filter(V2 > mean(tbl$V2))
+  sorted_values <- tbl[order(-tbl$V2),]
+  #sorted_values <- sort(tbl$V2, decreasing = TRUE)
+  sorted_values <- sorted_values[1:5000,]
+  sorted_color <- ifelse(sorted_values$V1 %in% spatial_coordinate$V4,"Valid barcodes","Others")
+  sorted_reads <- cbind(sorted_reads,sorted_values[,2],sorted_color)
+  barcodes <- cbind(barcodes,sorted_values[,1])
+}
+index <- seq(1:nrow(sorted_reads))
+col_name <- c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+colnames(sorted_reads) <- c("P21 Brain (20 \u03BCm)","color_B14","E11 Embryo (50 \u03BCm)","color_E14","E13 Embryo (50 \u03BCm)","color_E17")
+# Create the data frame for plotting
+data_to_plot <- as.data.frame(cbind(index,sorted_reads))
+data_to_plot_long <- pivot_longer(data_to_plot,names_to = "Data", cols=col_name, values_to = "value")
+data_to_plot_long$index <- as.numeric(data_to_plot_long$index)
+data_to_plot_long$value <- as.numeric(data_to_plot_long$value)
+data_to_plot_long$color <- data_to_plot_long$color_B14
+data_to_plot_long$color[row_number(data_to_plot_long) %% 3 == 1] <- data_to_plot_long$color_E14[row_number(data_to_plot_long) %% 3 == 1]
+data_to_plot_long$color[row_number(data_to_plot_long) %% 3 == 2] <- data_to_plot_long$color_E17[row_number(data_to_plot_long) %% 3 == 2]
+line_idx_brain <- round(sort(which(data_to_plot_long$color_B14 == "Others"))[3]/3)
+line_idx_embryo <- round(sort(which(data_to_plot_long$color_E14 == "Others"))[3]/3)
+line_idx_embryo_2 <- round(sort(which(data_to_plot_long$color_E17 == "Others"))[3]/3)
+grDevices::cairo_pdf("~/figures/fuh1/20240311_Kneeplots_QC.pdf",width = 6, height = 5)
+ggplot(data_to_plot_long, aes(x = index, y = value)) +
+  geom_point(aes(col=as.factor(color)),size=0.3) + # Add points to the line plot for clarity
+  geom_line(aes(linetype = Data),linewidth = 0.5) + # Add line plot
+  scale_y_log10() +
+  scale_linetype_manual(values=c("longdash", "dotted","dotdash"))+
+  labs(title = "", x = "Barcode", y = "#Reads Covered")+theme_bw()+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ theme(text = element_text(size = 12)) + theme(legend.position="top") + theme(legend.title=element_blank())+ 
+  scale_color_manual(values=c("#E69F00","#56B4E9")) + theme(legend.box = "vertical",legend.spacing.y = unit(0.0000001, 'mm'))+ geom_vline(xintercept = line_idx_brain, linetype = "dotdash", linewidth = 0.5) +
+    geom_vline(xintercept = line_idx_embryo, linetype = "longdash", linewidth = 0.5)+
+    geom_vline(xintercept = line_idx_embryo_2, linetype = "dotted", linewidth = 0.5)
+dev.off()
+```
+
+### compare mitochondira methylation level
+Use YAME (https://github.com/zhou-lab/YAME) to test for enrichment 
+yame summary -m ~/qc_check/chromosome.cm SpMETSLE17DM.cg > ~/tmp/20240110_chromosome_qc/SpMETSLE17DM
+```{r}
+folder_path <- "~/tmp/20240110_chromosome_qc/"
+file_names <- list.files(path = folder_path, full.names = TRUE)
+methylation_level = list()
+names = c()
+for (i in 1:length(file_names)){
+  tbl <- read.table(file_names[i],sep="\t")
+  colnames(tbl) <- tbl[1,]
+  tbl <- tbl[-1,]
+  tbl <- tbl[which(tbl$Mask=="chrM"),]
+  methylation_level[i] = list(tbl$Beta)
+  names = c(names,tbl$QFile[1])
+}
+names <- sub("\\..*","",names)
+names[1:3] <- c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+names(methylation_level) <- names
+data <- do.call(rbind, lapply(names(methylation_level), function(x) {
+  data.frame(value = unlist(methylation_level[[x]]), group = x)
+}))
+data$value <- as.numeric(data$value)*100
+data <- data[!is.na(data$value),]
+grDevices::cairo_pdf("~/figures/fuh1/20240311_Mitochondira_QC.pdf",width = 5, height = 4)
+ggplot(data, aes(x = group, y = value)) +
+  geom_boxplot(outlier.shape = NA) +
+  labs(title = "", x = "", y = "Mitochondria Retention Rate (%)")+theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ theme(text = element_text(size = 11))+scale_y_continuous(limits=c(0,100))
+dev.off()
+```
+
+### CG/CH Conversion rate boxplot
+```{r}
+library(ggbreak)
+folder_path <- "/mnt/isilon/zhou_lab/projects/20230531_Spatial_methseq/features_allc/"
+file_names <- list.files(path = folder_path, full.names = TRUE)
+file_names <- file_names[c(3,11,16)]
+plot_data = c()
+context = c("CA","CC","CG","CT")
+#names_all = c("Mouse Brain P21 (B14)","Mouse Brain P21 (B16)","Mouse Embryo E11.5 (E14)","Mouse Embryo E13.5 (E16)")
+names_all = c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+for (j in c(1,2,3,4)){
+  cpc_level = list()
+  names = c()
+  for (i in 1:length(file_names)){
+    cpc <- read.table(paste0(file_names[i],"/Dinuc.20231030.txt.gz"),sep="\t")
+    rows_to_keep <- seq(j, nrow(cpc), by = 4)
+    cpc <- cpc[rows_to_keep,]
+    cpc_level[i] = list(cpc$V2)
+    #names = c(names,cpc$V4[1])
+    names = c(names,names_all[i])
+  }
+  names(cpc_level) <- names
+  data <- do.call(rbind, lapply(names(cpc_level), function(x) {
+    data.frame(value = unlist(cpc_level[[x]]), group = x)
+  }))
+  data$value <- (as.numeric(data$value))*100
+  data$Context <- context[j]
+  plot_data <- rbind(plot_data,data)
+}
+grDevices::cairo_pdf("~/figures/fuh1/20240325_ConversionRate_QC.pdf",width = 5, height = 5)
+ggplot(plot_data, aes(x = group, y = value,color=Context)) +
+  geom_boxplot(outlier.shape = NA) +
+  #geom_boxplot(width = 0.01, fill = "white",outlier.shape = NA) +
+  labs(title = "", x = "", y = "CG/CH Rentention Rate (%)")+theme_bw()+theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  panel.border = element_blank(),
+  axis.line = element_line(color = "black")
+)+ scale_color_manual(values=c("#7ac7e2", "#e3716e","#54beaa","#eca680"))+ theme(text = element_text(size = 11))+ scale_y_break(c(7, 45), scales="free")+ theme( 
+  axis.title.y = element_text(hjust=0.7) 
+)
+dev.off()
+```
+
+### Metagene plot
+yame summary -m ~/references/mm10/KYCGKB_mm10/MetagenePC.20220911.cm ~/zhou_lab/projects/20230531_Spatial_methseq/pileup/SpMETSLE17DM/SpMETSLE17DM.cg > ~/tmp/20240110_chromosome_qc/20240227_SpMETSLE17DM_metagene
+yame summary -m ~/references/mm10/KYCGKB_mm10/MetagenePC.20220911.cm 2019_Hernando.cg > ~/tmp/20240110_chromosome_qc/20240112_Hernando2019_metagene
+```{r}
+folder_path <- "~/tmp/20230112_Metagene_qc/"
+file_names <- list.files(path = folder_path, full.names = TRUE)
+final_plot <- c()
+for (i in 1:length(file_names)){
+  metagene <- read.table(file_names[i],sep="\t")
+  colnames(metagene) <- metagene[1,]
+  metagene <- metagene[-1,]
+  name <- sub("\\..*","",metagene[1,1]) 
+  metagene <- metagene %>% dplyr::select('Query','Mask','Beta')
+  xticks <- as.factor(sub(".*~","",metagene$Mask))
+  metagene$Mask <- as.numeric(sub("\\~.*","",metagene$Mask))
+  idx <- order(metagene$Mask[1:30])
+  xticks <- xticks[1:30]
+  xticks <- xticks[idx]
+  metagene$Beta <- as.numeric(metagene$Beta)
+  metagene_plot <- metagene %>% group_by(Mask) %>% summarise(mean_methylation=mean(Beta,na.rm=TRUE),std=sd(Beta,na.rm=TRUE))
+  metagene_plot$Mask <- as.factor(metagene_plot$Mask)
+  metagene_plot$data <- name
+  final_plot <- rbind(final_plot,metagene_plot)
+}
+names_all = c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+final_plot$mean_methylation <- final_plot$mean_methylation*100
+final_plot$std <- final_plot$std*100
+grDevices::cairo_pdf("~/figures/fuh1/20240224_Metagene_QC.pdf",width = 7, height = 4)
+ggplot(data = final_plot, aes(x = Mask,group = data)) + 
+ scale_x_discrete(labels = xticks)+
+ geom_line(aes(y = mean_methylation, color=data), size = 1) + 
+ geom_ribbon(aes(y = mean_methylation, ymin = mean_methylation - std, ymax = mean_methylation + std,fill=data), alpha = .2,show.legend=FALSE) +
+ xlab("") + ylab("Mean Methylation Level %")+
+ theme_bw() + theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+
+  theme(legend.title = element_blank())+ scale_color_hue(labels = names_all) + theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ylim(0,100)+theme(legend.position = "top")
+dev.off()
+```
+
+### Check Duplication rate
+```{r}
+read_file_duplication <- function(filename) {
+  duplicate <- read.table(filename, fill = TRUE)
+  rate = (as.numeric(duplicate[6,11])/as.numeric(duplicate[3,9]))*100
+  rate
+}
+folder_path <- "/home/fuh1/tmp/Spatial_methseq/bam"
+file_names <- list.files(path = folder_path, full.names = TRUE)
+duplication_rate = list()
+names = c()
+for (i in 1:length(file_names)){
+  file_list <- list.files(path = file_names[i], pattern = "\\.dupsifter\\.stat$")
+  combined_data <- do.call(rbind, lapply(paste(file_names[i],file_list,sep="/"), read_file_duplication))
+  duplication_rate[i] <- list(combined_data)
+  names <- c(names,substr(file_names[i],36,nchar(file_names[i])))
+}
+names(duplication_rate) = c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+data <- do.call(rbind, lapply(names(duplication_rate), function(x) {
+  data.frame(value = unlist(duplication_rate[[x]]), group = x)
+}))
+
+data <- data[!is.na(data$value),]
+grDevices::cairo_pdf("~/figures/fuh1/20240423_Duplication_QC.pdf",width = 5, height = 5)
+ggplot(data, aes(x = group, y = value)) +
+  geom_boxplot(outlier.shape = NA) +
+  #geom_boxplot(width = 0.13, fill = "white",outlier.shape = NA) +
+  labs(title = "", x = "", y = "Duplication Rate (%)")+theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ theme(text = element_text(size = 11))+scale_y_continuous(limits=c(0,100))
+dev.off()
+```
+
+### Sparsity plot
+```{r}
+df1 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLE14DM/ChromHMM.20220414_new") %>% dplyr::filter(!is.na(Mask))
+df2 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLB14DM/ChromHMM.20220414_new") %>% dplyr::filter(!is.na(Mask))
+df3 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLE17DM/ChromHMM.20220414.txt.gz") %>% dplyr::filter(!is.na(Mask))
+df0 = read_tsv("~/zhoulab/labprojects/20210610_zhouw3/20230804_public_mm10_chromHMM_merged.tsv.gz") %>% dplyr::filter(!is.na(Mask)) 
+df0 <- df0 %>% filter(File %in% c("2019_Hernando","2021_Liu","2021_Shareef_mm10","2022_Nichols_mm10"))
+df0$File[which(df0$File=="2022_Nichols_mm10")] <- "2022_Nichols"
+df0$File[which(df0$File=="2021_Shareef_mm10")] <- "2021_Shareef"
+df0$File[which(df0$File=="2016_Guo_mm10")] <- "2016_Guo"
+df0$File[which(df0$File=="2016_Hou_mm10")] <- "2016_Hou"
+df0$File[which(df0$File=="2017_Luo_mm10")] <- "2017_Luo"
+df0$File[which(df0$File=="2018_Hui_mm10")] <- "2018_Hui"
+df0$File[which(df0$File=="2018_Zhu_mm10")] <- "2018_Zhu"
+df1$File = "E11 Embryo (50 \u03BCm)"
+df2$File = "P21 Brain (20 \u03BCm)"
+df3$File = "E13 Embryo (50 \u03BCm)"
+df1$Query <- df3$Query
+df2$Query <- df3$Query
+df0 = bind_rows(df0,df1,df2,df3)
+df2 = df0 %>% dplyr::select(File, QFile, N_query) %>% unique
+grDevices::cairo_pdf("~/figures/fuh1/20240331_NCG_covered_spatial.pdf",width=6, height=4)
+ggplot(df2) + geom_hline(yintercept=21000000) + geom_hline(yintercept=21000000*0.1, lty="dashed") + geom_hline(yintercept=21000000*0.01, lty="dotted") + scale_y_continuous(trans="log10") + geom_boxplot(aes(File, N_query, fill = File),outlier.shape=NA, width=0.5) + ylab("#CpGs covered") + xlab("")+ theme_bw()+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+) + theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(text = element_text(size = 11), legend.position = "None") + scale_fill_brewer(palette="Paired")
+dev.off()
+```
+
+### genomic uniformity plot
+```{r}
+df1 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLE14DM/ChromHMM.20220414_new") %>% dplyr::filter(!is.na(Mask))
+df2 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLB14DM/ChromHMM.20220414_new") %>% dplyr::filter(!is.na(Mask))
+df3 = read_tsv("~/zhou_lab/projects/20230531_Spatial_methseq/features/SpMETSLE17DM/ChromHMM.20220414.txt.gz") %>% dplyr::filter(!is.na(Mask))
+df0 = read_tsv("~/zhoulab/labprojects/20210610_zhouw3/20230804_public_mm10_chromHMM_merged.tsv.gz") %>% dplyr::filter(!is.na(Mask)) 
+df0$File[which(df0$File=="2022_Nichols_mm10")] <- "2022_Nichols"
+df0$File[which(df0$File=="2021_Shareef_mm10")] <- "2021_Shareef"
+df1$File = "E11 Embryo (50 \u03BCm)"
+df2$File = "P21 Brain (20 \u03BCm)"
+df3$File = "E13 Embryo (50 \u03BCm)"
+df1$Query <- df3$Query
+df2$Query <- df3$Query
+df0 = bind_rows(df0,df1,df2,df3)
+df0 = df0[df0$Mask != "Quies2",]
+df0 = df0[df0$File %in% c("2021_Shareef", "2021_Liu","2022_Nichols","2019_Hernando", "E11 Embryo (50 \u03BCm)","P21 Brain (20 \u03BCm)","E13 Embryo (50 \u03BCm)"),]
+df0$type <- ifelse(df0$File %in% c("2021_Shareef", "2021_Liu","2022_Nichols","2019_Hernando"),"old",df0$File)
+df0$File <- factor(df0$File, levels = c("2021_Shareef", "2021_Liu","2022_Nichols","2019_Hernando", "E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)","P21 Brain (20 \u03BCm)"))
+grDevices::cairo_pdf("~/figures/fuh1/20240312_genomic_distribution_QC.pdf",width = 13, height = 3)
+ggplot(df0) + geom_hline(yintercept=0, lty="dashed") + geom_boxplot(aes(Mask, Log2OddsRatio, color=File,fill=type), outlier.shape=NA,alpha=0.5) +xlab("") + ylim(-3,3) + theme_bw() + theme(text = element_text(size = 13))+scale_color_brewer(palette="Paired")+scale_fill_manual(values = c("old" = "white", "E11 Embryo (50 \u03BCm)" = "#FB9A99","P21 Brain (20 \u03BCm)"="#FDBF6F","E13 Embryo (50 \u03BCm)"="#E31A1C"), guide = 'none')+theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))
+dev.off()
+
+grDevices::cairo_pdf("~/figures/fuh1/20240313_genomic_beta_QC.pdf",width = 13, height = 3)
+ggplot(df0) + geom_boxplot(aes(Mask, Beta, color=File,fill=type), alpha=0.5,outlier.shape=NA) +xlab("") + ylim(0,1) + theme_bw()+ theme(text = element_text(size = 13))+scale_color_brewer(palette="Paired")+scale_fill_manual(values = c("old" = "white", "E11 Embryo (50 \u03BCm)" = "#FB9A99","P21 Brain (20 \u03BCm)"="#FDBF6F","E13 Embryo (50 \u03BCm)"="#E31A1C"), guide = 'none')+theme(axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))
+dev.off()
+```
+
+### global mCG% mCH% plot
+```{r}
+### global# reads
+#Use selected barcodes
+barcodes_to_keep <- readRDS("/home/fuh1/zhoulab/labprojects/20231112_Hongxiang/20240331_E17D_barcodesK.rds")
+datasets <- "SpMETSLE17DM"
+text <- paste0("yame summary /mnt/isilon/zhou_lab/projects/20230531_Spatial_methseq/pileup/",datasets,"/",datasets,".cg")
+tbl = read.table(text=system(text, intern=TRUE), header=F)
+tbl <- tbl[-1,]
+tbl$V6 <- as.numeric(tbl$V6)
+tbl <- tbl[match(barcodes_to_keep,tbl$V2),]
+cpg_number <- tbl$V6
+tbl$V10 <- as.numeric(tbl$V10)
+spatial_plot(barcodes_to_keep,tbl$V10,continuous = TRUE)
+group <- tbl$V10*100
+spatial_barcode <- barcodes_to_keep
+spatial_coordinate <- read.table("~/SpM/spatial_barcodes.txt",sep="\t")
+idx <- match(spatial_barcode,spatial_coordinate$V4)
+spatial_coordinate_filter <- spatial_coordinate[idx,]
+spatial_heatmap <- cbind(spatial_coordinate_filter$V2,spatial_coordinate_filter$V3,group)
+rownames(spatial_heatmap) <- spatial_barcode
+empty_barcode_idx <- which(!spatial_coordinate$V4 %in% rownames(spatial_heatmap))
+empty_barcode <- cbind(spatial_coordinate[empty_barcode_idx,]$V2,spatial_coordinate[empty_barcode_idx,]$V3,rep(NA,length(empty_barcode_idx)))
+spatial_heatmap <- as.data.frame(rbind(spatial_heatmap,empty_barcode))
+spatial_cluster <- cbind(rownames(spatial_heatmap),spatial_heatmap$group)
+colnames(spatial_cluster) <- c("barcode","group")
+spatial_cluster <- as.data.frame(spatial_cluster)
+spatial_cluster$group <- as.numeric(spatial_cluster$group)
+spatial_heatmap <- as.data.frame(spatial_heatmap)
+spatial_heatmap$V1 <- as.factor(spatial_heatmap$V1)
+spatial_heatmap$V2 <- as.factor(spatial_heatmap$V2)
+spatial_heatmap$group <- as.numeric(spatial_heatmap$group)
+spatial <- ggplot(spatial_heatmap, aes(V2, V1,color=group))+
+    geom_point(size = 1.5) +
+    theme_bw() + xlab("") + ylab("")+scale_x_discrete(limits = rev(levels(spatial_heatmap$V2)))+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.border = element_blank())+
+    coord_fixed(ratio=1)+ scale_y_discrete(limits=rev)+scale_color_gradientn(colors = rev(brewer.pal(n = 11, name = "Spectral")),na.value = "white") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.text.y = element_blank(), 
+          axis.ticks.y = element_blank())+labs(colour="Global M-level%")
+ggsave("~/figures/fuh1/20240503_E17_globalCG.pdf",width=5,height=4)
+```
+
+### RNA QC UMI/Feature plot 
+```{r}
+folder_path <- "~/zhou_lab/projects/20230531_Spatial_methseq/RNA/"
+file_names <- list.files(path = folder_path, full.names = TRUE)
+file_names <- file_names[c(6,13,16)]
+ncount = c()
+nfeature = c()
+names = c()
+for (i in 1:length(file_names)){
+  gene_matrix <- Read10X(paste0(file_names[i],"/raw/"))
+  assay = "Spatial"
+  filter.matrix = TRUE
+  slice = "slice1"
+  object <- CreateSeuratObject(counts = gene_matrix, assay = assay)
+  ncount <- cbind(ncount, log10(object@meta.data[,2]+1))
+  nfeature <- cbind(nfeature, log10(object@meta.data[,3]+1))
+  names <- c(names,substr(file_names[i],60,nchar(file_names[i])))
+}
+names = c("P21 Brain (20 \u03BCm)","E11 Embryo (50 \u03BCm)","E13 Embryo (50 \u03BCm)")
+nfeature <- as.data.frame(nfeature)
+ncount <- as.data.frame(ncount)
+colnames(nfeature) <- names
+colnames(ncount) <- names
+nfeature_plot <- pivot_longer(nfeature,cols = everything(), 
+                        names_to = "Group", 
+                        values_to = "Value")
+ncount_plot <- pivot_longer(ncount,cols = everything(), 
+                        names_to = "Group", 
+                        values_to = "Value")
+nfeature_p <- ggplot(nfeature_plot, aes(x = Group, y = Value, fill = Group)) + 
+  geom_violin()+
+  geom_boxplot(width = 0.13, fill = "white",outlier.shape = NA) +
+  labs(title = "", x = "", y = "No. of genes per pixel (log10)")+theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ theme(text = element_text(size = 11))+scale_y_continuous(limits=c(0,5))+ 
+  scale_fill_manual(values=c("#175e7d", "#a1c6e3", "#eecabc"))
+ncount_p <- ggplot(ncount_plot, aes(x = Group, y = Value,fill = Group)) + 
+  geom_violin()+
+  geom_boxplot(width = 0.13, fill = "white",outlier.shape = NA) +
+  labs(title = "", x = "", y = "No. of UMIs per pixel (log10)")+theme_bw()+theme(legend.position = "none",axis.text.x = element_text(angle = 50, vjust = 1, hjust=1))+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)+ theme(text = element_text(size = 11))+scale_y_continuous(limits=c(0,5))+ 
+  scale_fill_manual(values=c("#175e7d", "#a1c6e3", "#eecabc"))
+grDevices::cairo_pdf("~/figures/fuh1/20240325_RNA_QC.pdf",width = 7, height = 5)
+nfeature_p+ncount_p
+dev.off()
+```
