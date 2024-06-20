@@ -1,6 +1,6 @@
 # Spatial joint profiling of DNA methylome and transcriptome
 ### Introduction
-This repository aims to share the raw data processing and downstream data analysis & visualization codes used in the Spatial-MT-seq project.
+This repository aims to share the raw data processing and downstream data analysis & visualization codes used in the Spatial DNA Methylation and RNA Transcriptomic Sequencing (Spatial-DMT-seq) project.
 
 Next Generation Sequencing (NGS) NGS was conducted on an Illumina NovaSeq 6000 sequencer (pair-end, 150-base-pair mode)
 ![]( https://github.com/zhou-lab/Spatial-MT-seq-2024/blob/ea6589f2ce5ea9fc3a55fe506de7e67b97ec7cd0/workflow/Experiment_pipeline.jpg)
@@ -8,7 +8,7 @@ Next Generation Sequencing (NGS) NGS was conducted on an Illumina NovaSeq 6000 s
 ### Spatial_Methylation-seq/Spatial_RNA_seq analysis pipeline
 ![]( https://github.com/zhou-lab/Spatial-MT-seq-2024/blob/ea6589f2ce5ea9fc3a55fe506de7e67b97ec7cd0/workflow/Analysis_pipeline.jpg)
 
-### Running Spatial-MT snakemake files
+### Running Spatial-DMT-seq snakemake files
 ## Dependiencies
 * [Snakemake](https://snakemake.readthedocs.io/en/stable/index.html). 
 * [Biopython](https://biopython.org/docs/1.75/api/index.html).
@@ -21,9 +21,13 @@ Next Generation Sequencing (NGS) NGS was conducted on an Illumina NovaSeq 6000 s
 ## Run the pipeline
 For RNA: Change all the directories in the Snakefile
 To obtain RNA count matrices: sbatch Snakemake.sh
+
 For methylation: Change the config ID to the data ID number
+
 To obtain CG levels: runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk feature_mean_all
+
 To obtain Biscuit QC results: runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk biscuit_qc_all
+
 To obtain CH levels: runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk feature_mean_allc_all
 
 ### Data downstream analysis and visualization
