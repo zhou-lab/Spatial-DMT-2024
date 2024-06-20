@@ -1,0 +1,44 @@
+mm10:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/mm10/
+  BISCUIT_INDEX: biscuit/mm10.fa
+  BISMARK_BT2_INDEX: bismark_bt2
+  REF_FASTA: mm10.fa
+  CPG_BED: annotation/cpg/cpg.bed.gz
+  CPG_STRANDED_BED: annotation/cpg/cpgStranded_nocontig.bed.gz
+  ALLC_BED: annotation/allc/allc.bed.gz
+  ALLC_CR: annotation/allc/allc.cr
+  CPA_BED: annotation/allc/ca.bed.gz
+  CAC_BED: annotation/allc/cac.bed3.gz
+  BISCUIT_QCASSET: biscuit/QC/
+  CPG_BED_LAMBDA: --
+mm10Lambda:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/mm10Lambda/
+  REF_FASTA: mm10Lambda.fa
+  CPG_BED: annotation/cpg/cpg_nocontig.bed.gz
+  CPG_BED_LAMBDA: annotation/cpg/cpg_lambda.bed.gz
+hg38:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/hg38/
+  BISCUIT_INDEX: biscuit/hg38.fa
+  REF_FASTA: hg38.fa
+  ALLC_BED: annotation/allc/allc.bed.gz
+  CPG_BED: annotation/cpg/cpg_nocontig.bed.gz
+  CPA_BED: annotation/allc/ca.bed.gz
+  CAC_BED: annotation/allc/cac.bed3.gz
+  BISCUIT_QCASSET: biscuit/QC/
+  CPG_BED_LAMBDA: --
+hg38Lambda:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/hg38Lambda/
+  REF_FASTA: hg38Lambda.fa
+  CPG_BED: annotation/cpg/cpg_nocontig.bed.gz
+  CPG_BED_LAMBDA: annotation/cpg/cpg_lambda.bed.gz
+Lambda:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/Lambda/
+  REF_FASTA: J02459.fa
+  BISCUIT_INDEX: biscuit/J02459.fa
+  CPG_BED: annotation/cpg/cpg.bed.gz
+  CPG_BED_LAMBDA: --
+ZymoStandardSet:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/ZymoStandardSet/
+  REF_FASTA: ZYMO.fa
+  CPG_BED: c.bed.gz
+  CPG_BED_LAMBDA: --
