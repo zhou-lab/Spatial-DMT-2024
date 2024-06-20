@@ -1,0 +1,686 @@
+---
+title: "Integration_E11E13"
+output: html_document
+date: "2024-06-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load necessary libraries
+```{r}
+suppressMessages(library(grid))
+suppressMessages(library(SeuratData))
+suppressMessages(library(Seurat))
+suppressMessages(library(ggplot2))
+suppressMessages(library(patchwork))
+suppressMessages(library(dplyr))
+suppressMessages(library(future))
+suppressMessages(library(jsonlite))
+suppressMessages(library(glmGamPoi))
+suppressMessages(library(presto))
+suppressMessages(library(Rtsne))
+suppressMessages(library(gridExtra))
+suppressMessages(library(tidyr))
+suppressMessages(library(dplyr))
+suppressMessages(library(pbmcapply))
+suppressMessages(library(SummarizedExperiment))
+suppressMessages(library("extrafont"))
+suppressMessages(library(uwot))
+suppressMessages(library("dbscan"))
+suppressMessages(library("leiden"))
+suppressMessages(library("mstknnclust"))
+suppressMessages(library(png))
+suppressMessages(library(ggpubr))
+suppressMessages(library(reshape2))
+suppressMessages(library("factoextra"))
+suppressMessages(library(data.table))
+suppressMessages(library(caret))
+suppressMessages(library(stringr))
+suppressMessages(library(monocle3))
+suppressMessages(library(SeuratWrappers))
+suppressMessages(library(irlba))
+suppressMessages(library(cowplot))
+suppressMessages(library(tools))
+suppressMessages(library(openai))
+suppressMessages(library(pbmcapply))
+suppressMessages(library(GenomicRanges))
+suppressMessages(library(TxDb.Mmusculus.UCSC.mm10.knownGene))
+suppressMessages(library(org.Mm.eg.db))
+suppressMessages(library(ComplexHeatmap))
+suppressMessages(library(RColorBrewer))
+```
+
+### load E11,E13 WNN seurat objects (can be found on GEO)
+```{r}
+E11_wnn <- readRDS("~/tmp/spatial.obj_04302024.rds")
+E13_wnn <- readRDS("~/tmp/spatial.obj_05172024.rds")
+object.list = list(CreateSeuratObject(E11_wnn[["SCT"]]), CreateSeuratObject(E13_wnn[["SCT"]]))
+object.list[[1]]@meta.data$orig.ident <- "E11"
+object.list[[2]]@meta.data$orig.ident <- "E13"
+features <- SelectIntegrationFeatures(object.list, nfeatures = 3000)
+object.list <- PrepSCTIntegration(object.list, anchor.features = features)
+anchors <- FindIntegrationAnchors(object.list,normalization.method = "SCT",
+    anchor.features = features)
+trA.integrated <- IntegrateData(anchorset = anchors,normalization.method = "SCT")
+trA.integrated <- RunPCA(trA.integrated,verbose = FALSE)
+trA.integrated <- RunUMAP(trA.integrated, dims = 1:30,  reduction = "pca")
+trA.integrated <- FindNeighbors(trA.integrated, reduction = "pca", dims = 1:30,random.seed = 123)
+trA.integrated <- FindClusters(trA.integrated, verbose = FALSE, resolution = 0.3,random.seed = 123)
+DimPlot(trA.integrated, reduction = "umap", split.by = "orig.ident")
+ggsave("~/figures/fuh1/e11_e13_RNA_integrate_split.pdf",width=8,height=5)
+p1 <- DimPlot(trA.integrated, reduction = "umap")
+p3 <- DimPlot(trA.integrated, group.by = c("orig.ident"),)+ labs(title = "")
+wrap_plots(p1,p3)
+ggsave("~/figures/fuh1/e11_e13_RNA_integrate.pdf",width=9,height=5)
+```
+
+### Spatial map of the integrated cluster
+```{r}
+e11_barcode <- readRDS("/home/fuh1/zhoulab/labprojects/20231112_Hongxiang/20240331_E14D_barcodesK.rds")
+e13_barcode <- readRDS("/home/fuh1/zhoulab/labprojects/20231112_Hongxiang/20240331_E17D_barcodesK.rds")
+e11_cluster <- trA.integrated$seurat_clusters[which(trA.integrated$orig.ident == "E11")]
+e13_cluster <- trA.integrated$seurat_clusters[which(trA.integrated$orig.ident == "E13")]
+p1 <- spatial_plot(e11_cluster,e11_barcode)+theme(legend.position = "None")
+p2 <- spatial_plot(e13_cluster,e13_barcode)
+p1+p2
+ggsave("~/figures/fuh1/e11_e13_integrate_map.pdf",width=10,height=5)
+```
+
+### Find conserved markers
+```{r}
+trA.markers <- FindConservedMarkers(trA.integrated, ident.1 = "0", grouping.var = "orig.ident", verbose = FALSE)
+saveRDS(trA.integrated,"~/zhoulab/labprojects/20231112_Hongxiang/20230521_trA.rds")
+markers.to.plot <- c("Tfec", "Lingo3", "AK157302", "Ly86", "Psmb8", "H19", "Sox11", "Map2", "Dpysl3", "Tap1", "Slc17a8", "Zfp951", "Adgrv1", "1010001N08Rik", "Zbtb20", "Ptn", "Peg3", "RP23-145I16.5", "Tnnt2", "Actc1", "Myh6", "Nefm", "Scn9a", "Nefl", "Col2a1", "Col11a1", "Tcf4", "Emx2", "Gm3764")
+DotPlot(trA.integrated, features = markers.to.plot, cols = c("blue", "red"), dot.scale = 5, split.by = "orig.ident") +
+    RotatedAxis()
+ggsave("~/figures/fuh1/20240521_conserved_gene.pdf",width=8,height=5)
+```
+
+### pseudotime trajectory analysis
+```{r}
+cds <- trA.integrated
+DefaultAssay(cds) <- "RNA"
+cds <- as.cell_data_set(subset(cds, idents = 2))
+cds <- cluster_cells(cds, resolution=0.005)
+last_chars <- substr(names(cds@clusters$UMAP$partitions), nchar(names(cds@clusters$UMAP$partitions)), nchar(names(cds@clusters$UMAP$partitions)))
+cds@clusters$UMAP$partitions <- as.factor(last_chars)
+names(cds@clusters$UMAP$partitions) <- names(cds@clusters$UMAP$clusters)
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+wrap_plots(p1, p2)
+cds <- learn_graph(cds, use_partition = TRUE, verbose = FALSE)
+plot_cells(cds,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE)
+cds <- order_cells(cds, root_cells = colnames(cds[,clusters(cds) == 3]))
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           group_cells_by = "cluster",
+           label_cell_groups = FALSE,
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           label_roots = FALSE,
+           trajectory_graph_color = "grey60")
+
+integrated.sub <- as.Seurat(cds, assay = NULL)
+p1 <- FeaturePlot(integrated.sub, "monocle3_pseudotime")+ labs(title = "")
+### plot pseudotime on spatial graph
+trA.integrated <- AddMetaData(
+  object = trA.integrated,
+  metadata = cds@principal_graph_aux@listData$UMAP$pseudotime,
+  col.name = "pseudotime"
+)
+trA_cluster <- trA.integrated$seurat_clusters
+trA_idx <- which(trA_cluster == "2")
+trA_orig_ident <- trA.integrated$orig.ident[trA_idx]
+trA_pseudo_selected <- trA.integrated@meta.data$pseudotime
+trA_differential_gene_spatial <- trA_pseudo_selected
+trA_differential_gene_spatial[-trA_idx] = 0
+p2 <- spatial_plot(trA_differential_gene_spatial[trA.integrated$orig.ident == "E13"],e13_barcode,continuous=TRUE)+scale_color_gradientn(colors = RColorBrewer::brewer.pal(7, "GnBu"), name = "Pseudotime", na.value = "white")
+p3 <- spatial_plot(trA_differential_gene_spatial[trA.integrated$orig.ident == "E11"],e11_barcode,continuous=TRUE)+scale_color_gradientn(colors = RColorBrewer::brewer.pal(7, "GnBu"), name = "Pseudotime", na.value = "white")
+p1
+ggsave("~/figures/fuh1/20240523_pseudotime_umap.pdf",width=3,height=3)
+p2+p3
+ggsave("~/figures/fuh1/20240523_pseudotime.pdf",width=7,height=3)
+cds <- estimate_size_factors(cds)
+cds_graph_test_results <- graph_test(cds,
+                                     neighbor_graph = "principal_graph",
+                                     cores = 8)
+rowData(cds)$gene_short_name <- row.names(rowData(cds))
+head(cds_graph_test_results, error=FALSE, message=FALSE, warning=FALSE)
+deg_ids <- rownames(subset(cds_graph_test_results[order(cds_graph_test_results$morans_I, decreasing = TRUE),], q_value < 0.05))
+
+plot_cells(cds,
+           #genes=deg_ids[1:6],
+           genes=c("Dlx1","Sox2","Nnat","Gap43","Arx","Lhx6"),
+           show_trajectory_graph = FALSE,
+           label_cell_groups = FALSE,
+           label_leaves = FALSE,
+           cell_size = 0.7)
+ggsave("~/figures/fuh1/20240523_pseudo_gene.pdf",width=5,height=3)
+```
+
+### DNAM integration
+```{r}
+meth_mtx <- read.csv("~/tmp/Spatial_methseq/scbs/SpMETSLE1417DM_matrix/methylation_fractions.csv.gz", row.names=1) %>% as.matrix()
+filter_barcode <- sub("\\..*$", "", rownames(meth_mtx))
+#filter_barcode <- sub("_.*$", "", filter_barcode)
+selected_barcode <- c(paste(e11_barcode,"1",sep="_"),paste(e13_barcode,"2",sep="_"))
+idx <- match(selected_barcode,filter_barcode)
+DNAm_data <- as.data.frame(meth_mtx)
+DNAm_data <- DNAm_data[idx,]
+pca <- DNAm_data %>%
+  scale(center = T, scale = F) %>%
+  prcomp_iterative(n = 10, n_iter = 50)
+DNAm_data <- as.data.frame(pca[[2]])
+DNAm_data <- as.data.frame(lapply(DNAm_data, function(x) (x - min(x)) / (max(x) - min(x))))
+saveRDS(DNAm_data,"~/tmp/20240423_SpMETSLE1417D_DNAm_fraction.rds")
+DNA_assay <- CreateAssayObject(counts = t(DNAm_data))
+DNA_assay <- CreateSeuratObject(DNA_assay)
+colnames(DNA_assay) <- names(trA.integrated$orig.ident)
+DNA_assay$orig.ident <- trA.integrated$orig.ident
+DNA_assay[["RNA"]] <- split(DNA_assay[["RNA"]], f = DNA_assay$orig.ident)
+#DNA_assay <- NormalizeData(DNA_assay)
+DNA_assay <- FindVariableFeatures(DNA_assay)
+DNA_assay <- ScaleData(DNA_assay)
+DNA_assay <- RunPCA(DNA_assay)
+DNA_assay <- IntegrateLayers(object = DNA_assay, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca",
+    verbose = FALSE)
+DNA_assay[["RNA"]] <- JoinLayers(DNA_assay[["RNA"]])
+DNA_assay <- FindNeighbors(DNA_assay, reduction = "integrated.cca", dims = 1:30)
+DNA_assay <- FindClusters(DNA_assay, resolution = 1)
+DNA_assay <- RunUMAP(DNA_assay, dims = 1:30, reduction = "integrated.cca")
+p1 <- DimPlot(DNA_assay, reduction = "umap")
+p3 <- DimPlot(DNA_assay, group.by = c("orig.ident"),)+ labs(title = "")
+wrap_plots(p1,p3)
+#ggsave("~/figures/fuh1/20240524_e11_e13_DNA_integrate.pdf",width=9,height=5)
+DimPlot(DNA_assay, reduction = "umap", split.by = "orig.ident")
+#ggsave("~/figures/fuh1/20240524_e11_e13_DNA_integrate_split.pdf",width=9,height=5)
+e11_cluster <- DNA_assay$seurat_clusters[which(DNA_assay$orig.ident == "E11")]
+e13_cluster <- DNA_assay$seurat_clusters[which(DNA_assay$orig.ident == "E13")]
+p1 <- spatial_plot(e11_cluster,e11_barcode)+theme(legend.position = "None")
+p2 <- spatial_plot(e13_cluster,e13_barcode)
+p1+p2
+ggsave("~/figures/fuh1/e11_e13_integrate_map_DNA.pdf",width=10,height=5)
+```
+
+### WNN integration
+```{R}
+new_assay <- DNA_assay[["RNA"]]
+trA.integrated[["DNAm"]] <- new_assay
+DefaultAssay(trA.integrated) <- "DNAm"
+VariableFeatures(trA.integrated) <- rownames(trA.integrated[["DNAm"]])
+trA.integrated@assays$DNAm$scale.data <- as.matrix(trA.integrated@assays$DNAm$data)
+trA.integrated <- RunPCA(trA.integrated, assay = "DNAm", reduction.name = 'mpca', verbose = FALSE)
+trA.integrated <- FindNeighbors(trA.integrated, reduction = "mpca", dims = 1:10)
+trA.integrated <- FindClusters(trA.integrated, verbose = FALSE, resolution = 1)
+trA.integrated <- RunUMAP(trA.integrated, reduction = "mpca",  reduction.name = "meth.umap", dims = 1:10)
+trA.integrated@reductions$meth.cca <- DNA_assay@reductions$integrated.cca
+trA.integrated <- FindMultiModalNeighbors(
+  trA.integrated, reduction.list = list("pca", "meth.cca"), 
+  dims.list = list(1:30, 1:10), modality.weight.name = "RNA.weight"
+)
+trA.integrated <- RunUMAP(trA.integrated, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+trA.integrated <- FindClusters(trA.integrated, graph.name = "wsnn", algorithm = 3, verbose = FALSE, resolution = 0.3)
+Combine_partition <- trA.integrated$seurat_clusters
+
+p1 <- DimPlot(trA.integrated, reduction = "wnn.umap")
+p3 <- DimPlot(trA.integrated, reduction = "wnn.umap", group.by = c("orig.ident"),)+ labs(title = "")
+wrap_plots(p1,p3)
+ggsave("~/figures/fuh1/20240529_e11_e13_integrate.pdf",width=10,height=5)
+DimPlot(trA.integrated, reduction = "wnn.umap", split.by = "orig.ident")
+ggsave("~/figures/fuh1/20240529_e11_e13_integrate_split.pdf",width=8,height=5)
+e11_cluster <- trA.integrated$seurat_clusters[which(trA.integrated$orig.ident == "E11")]
+e13_cluster <- trA.integrated$seurat_clusters[which(trA.integrated$orig.ident == "E13")]
+p1 <- spatial_plot(e11_cluster,e11_barcode)+theme(legend.position = "None")
+p2 <- spatial_plot(e13_cluster,e13_barcode)
+p1+p2
+ggsave("~/figures/fuh1/20240529_e11_e13_integrate_map.pdf",width=10,height=5)
+```
+
+### Differential analysis
+```{r}
+spatial.obj <- readRDS("~/intermediate/20240604_spatial.rds")
+trA.integrated <- spatial.obj
+E11_wnn <- readRDS("~/intermediate/20240609_spatial_e11.rds")
+E13_wnn <- readRDS("~/intermediate/20240609_spatial_e13.rds")
+RNA_data_smooth <- cbind(E11_wnn@assays$RNA_smooth_sep$data,E13_wnn@assays$RNA_smooth_sep$data)
+RNA_assay <- CreateAssayObject(counts = RNA_data_smooth)
+RNA_assay <- CreateSeuratObject(RNA_assay)
+colnames(RNA_assay) <- names(trA.integrated$orig.ident)
+RNA_assay$orig.ident <- trA.integrated$orig.ident
+trA.integrated[["RNA_smooth_sep"]] <- RNA_assay[["RNA"]]
+DNA_data_smooth <- cbind(E11_wnn@assays$DNA_smooth_sep$data,E13_wnn@assays$DNA_smooth_sep$data)
+DNA_assay <- CreateAssayObject(counts = DNA_data_smooth)
+DNA_assay <- CreateSeuratObject(DNA_assay)
+colnames(DNA_assay) <- names(trA.integrated$orig.ident)
+DNA_assay$orig.ident <- trA.integrated$orig.ident
+trA.integrated[["DNA_smooth_Sep"]] <- DNA_assay[["RNA"]]
+```
+
+### Plot spatial and UMAP for spatial.obj
+### RNA plot 
+```{r}
+e11_barcode <- readRDS("/home/fuh1/zhoulab/labprojects/20231112_Hongxiang/20240331_E14D_barcodesK.rds")
+e13_barcode <- readRDS("/home/fuh1/zhoulab/labprojects/20231112_Hongxiang/20240331_E17D_barcodesK.rds")
+DefaultAssay(trA.integrated) <- "integrated"
+trA.integrated <- FindNeighbors(trA.integrated, reduction = "pca", dims = 1:30,random.seed = 123)
+trA.integrated <- FindClusters(trA.integrated, verbose = FALSE, resolution = 0.3,random.seed = 123)
+trA.integrated$wnn_res.0.3 <- trA.integrated$seurat_clusters
+n_clusters <- length(unique(trA.integrated$wnn_res.0.3))
+cols <- ArchRPalettes$stallion[as.character(seq_len(n_clusters))]
+cols[1] <- "#F47D2B"
+cols[4] <- "#D51F26"
+cols[5] <- "#90D5E4"
+cols[7] <- "#89C75F"
+cols[8] <- "#D8A767"
+cols[9] <- "#9983BD"
+cols[10] <- "#F37B7D"
+trA.integrated$wnn_res.0.3 <- paste0('R', trA.integrated$wnn_res.0.3)
+names(cols) <- paste0('R', n_clusters-seq_len(n_clusters))
+trA.integrated$wnn_res.0.3 <- factor(trA.integrated$wnn_res.0.3, levels = paste0("R", 0:(n_clusters-1)))
+Idents(trA.integrated) <- "wnn_res.0.3"
+DimPlot(trA.integrated, reduction = "umap", split.by = "orig.ident",cols = cols,repel = TRUE,pt.size = 1) + DarkTheme() + NoGrid()+xlab("UMAP 1")+ylab("UMAP 2")
+ggsave("~/figures/fuh1/20240608_e1113_RNA_integrate_split.pdf",width=8,height=5)
+p1 <- DimPlot(trA.integrated, reduction = "umap",cols = cols,repel = TRUE,pt.size = 1)+xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+p3 <- DimPlot(trA.integrated, group.by = c("orig.ident"),repel = TRUE,pt.size = 1)+ labs(title = "") + xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+wrap_plots(p1,p3)
+ggsave("~/figures/fuh1/20240608_e1113_RNA_integrate.pdf",width=9,height=5)
+E11_wnn <- readRDS("~/tmp/spatial.obj_04302024.rds")
+E13_wnn <- readRDS("~/tmp/spatial.obj_05172024.rds")
+e11_cluster <- trA.integrated$wnn_res.0.3[which(trA.integrated$orig.ident == "E11")]
+e13_cluster <- trA.integrated$wnn_res.0.3[which(trA.integrated$orig.ident == "E13")]
+names(e11_cluster) <- sub("_.*","",names(e11_cluster))
+E11_wnn$seurat_clusters <- e11_cluster
+p1 <- SpatialDimPlot(E11_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "None") + DarkTheme() + NoAxes() + NoGrid() 
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=22)
+names(e13_cluster) <- sub("_.*","",names(e13_cluster))
+E13_wnn$seurat_clusters <- e13_cluster
+p2 <- SpatialDimPlot(E13_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "right", legend.text=element_text(size=13), legend.title=element_text(size=13)) + DarkTheme() + NoAxes() + NoGrid() + guides(fill = guide_legend(title="",override.aes = list(size = 5)))
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=22)
+p1+p2
+ggsave("~/figures/fuh1/20240609_e1113_RNA_integrate_map.pdf",width=10,height=5)
+```
+
+### WNN plot
+```{r}
+trA.integrated <- FindClusters(trA.integrated, graph.name = "wsnn", algorithm = 3, verbose = FALSE, resolution = 0.3,random.seed=123)
+trA.integrated$wnn_res.0.3 <- trA.integrated$seurat_clusters
+n_clusters <- length(unique(trA.integrated$wnn_res.0.3))
+cols <- ArchRPalettes$stallion[as.character(seq_len(n_clusters))]
+cols[1] <- "#8A9FD1"
+cols[4] <- "#D51F26"
+cols[5] <- "#D8A767"
+cols[7] <- "#90D5E4"
+cols[8] <- "#9983BD"
+cols[9] <- "#89288F"
+cols[10] <- "#F37B7D"
+cols[11] <- "#D24B27"
+cols[12] <- "#89C75F"
+#scales::show_col(cols)
+trA.integrated$wnn_res.0.3 <- paste0('W', trA.integrated$wnn_res.0.3)
+names(cols) <- paste0('W', n_clusters-seq_len(n_clusters))
+trA.integrated$wnn_res.0.3 <- factor(trA.integrated$wnn_res.0.3, levels = paste0("W", 0:(n_clusters-1)))
+Idents(trA.integrated) <- "wnn_res.0.3"
+DimPlot(trA.integrated, reduction = "wnn.umap", split.by = "orig.ident",cols = cols,repel = TRUE,pt.size = 1) + DarkTheme() + NoGrid()+xlab("UMAP 1")+ylab("UMAP 2")
+ggsave("~/figures/fuh1/20240608_e1113_WNN_integrate_split.pdf",width=8,height=5)
+p1 <- DimPlot(trA.integrated, reduction = "wnn.umap",cols = cols,repel = TRUE,pt.size = 1)+xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+p3 <- DimPlot(trA.integrated,reduction = "wnn.umap", group.by = c("orig.ident"),repel = TRUE,pt.size = 1)+ labs(title = "") + xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+wrap_plots(p1,p3)
+ggsave("~/figures/fuh1/20240608_e1113_WNN_integrate.pdf",width=9,height=5)
+E11_wnn <- readRDS("~/tmp/spatial.obj_04302024.rds")
+E13_wnn <- readRDS("~/tmp/spatial.obj_05172024.rds")
+e11_cluster <- trA.integrated$wnn_res.0.3[which(trA.integrated$orig.ident == "E11")]
+e13_cluster <- trA.integrated$wnn_res.0.3[which(trA.integrated$orig.ident == "E13")]
+names(e11_cluster) <- sub("_.*","",names(e11_cluster))
+E11_wnn$seurat_clusters <- e11_cluster
+p1 <- SpatialDimPlot(E11_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "None") + DarkTheme() + NoAxes() + NoGrid() 
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=22)
+names(e13_cluster) <- sub("_.*","",names(e13_cluster))
+E13_wnn$seurat_clusters <- e13_cluster
+p2 <- SpatialDimPlot(E13_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "right", legend.text=element_text(size=13), legend.title=element_text(size=13)) + DarkTheme() + NoAxes() + NoGrid() + guides(fill = guide_legend(title="",override.aes = list(size = 5)))
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=22)
+p1+p2
+ggsave("~/figures/fuh1/20240609_e1113_WNN_integrate_map.pdf",width=10,height=5)
+```
+
+### DNA plot
+```{r}
+DNAm_data <- readRDS("~/tmp/20240423_SpMETSLE1417D_DNAm_residual.rds")
+#rownames(DNAm_data) <- names(trA.integrated$orig.ident)
+DNA_assay <- CreateAssayObject(counts = t(DNAm_data))
+DNA_assay <- CreateSeuratObject(DNA_assay)
+colnames(DNA_assay) <- names(trA.integrated$orig.ident)
+DNA_assay$orig.ident <- trA.integrated$orig.ident
+DNA_assay[["RNA"]] <- split(DNA_assay[["RNA"]], f = DNA_assay$orig.ident)
+DNA_assay <- FindVariableFeatures(DNA_assay)
+DNA_assay <- ScaleData(DNA_assay)
+DNA_assay <- RunPCA(DNA_assay)
+DNA_assay <- IntegrateLayers(object = DNA_assay, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca",
+    verbose = FALSE)
+DNA_assay[["RNA"]] <- JoinLayers(DNA_assay[["RNA"]])
+DNA_assay <- FindNeighbors(DNA_assay, reduction = "integrated.cca", dims = 1:30)
+DNA_assay <- FindClusters(DNA_assay, resolution = 1,random.seed = 123)
+DNA_assay <- RunUMAP(DNA_assay, dims = 1:30, reduction = "integrated.cca",random.seed = 123)
+DNA_assay$wnn_res.0.3 <- DNA_assay$seurat_clusters
+n_clusters <- length(unique(DNA_assay$wnn_res.0.3))
+cols <- ArchRPalettes$stallion[as.character(seq_len(n_clusters))]
+cols[1] <- "#D8A767"
+cols[2] <- "#FEE500"
+cols[3] <- "#F37B7D"
+cols[4] <- "#D51F26"
+cols[5] <- "#89288F"
+cols[6] <- "#F47D2B"
+DNA_assay$wnn_res.0.3 <- paste0('D', DNA_assay$wnn_res.0.3)
+names(cols) <- paste0('D', n_clusters-seq_len(n_clusters))
+DNA_assay$wnn_res.0.3 <- factor(DNA_assay$wnn_res.0.3, levels = paste0("D", 0:(n_clusters-1)))
+Idents(DNA_assay) <- "wnn_res.0.3"
+p1 <- DimPlot(DNA_assay, reduction = "umap",cols = cols,repel = TRUE,pt.size = 1)+xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+p3 <- DimPlot(DNA_assay, group.by = c("orig.ident"),repel = TRUE,pt.size = 1)+ labs(title = "") + xlab("UMAP 1") + ylab("UMAP 2")+ DarkTheme() + NoGrid()
+wrap_plots(p1,p3)
+ggsave("~/figures/fuh1/20240608_e1113_DNA_integrate.pdf",width=9,height=5)
+DimPlot(DNA_assay, reduction = "umap", split.by = "orig.ident",cols = cols,repel = TRUE,pt.size = 1) + DarkTheme() + NoGrid()+xlab("UMAP 1")+ylab("UMAP 2")
+ggsave("~/figures/fuh1/20240608_e1113_DNA_integrate_split.pdf",width=8,height=5)
+e11_cluster <- DNA_assay$wnn_res.0.3[which(DNA_assay$orig.ident == "E11")]
+e13_cluster <- DNA_assay$wnn_res.0.3[which(DNA_assay$orig.ident == "E13")]
+names(e11_cluster) <- sub("_.*","",names(e11_cluster))
+E11_wnn$seurat_clusters <- e11_cluster
+p1 <- SpatialDimPlot(E11_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "None") + DarkTheme() + NoAxes() + NoGrid() 
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=22)
+names(e13_cluster) <- sub("_.*","",names(e13_cluster))
+E13_wnn$seurat_clusters <- e13_cluster
+p2 <- SpatialDimPlot(E13_wnn, label = FALSE, group.by = "seurat_clusters",label.size = 3,  pt.size.factor = 4.5, image.alpha = 0, stroke = 0, cols = cols) +
+  theme(legend.position = "right", legend.text=element_text(size=13), legend.title=element_text(size=13)) + DarkTheme() + NoAxes() + NoGrid() + guides(fill = guide_legend(title="",override.aes = list(size = 5)))
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=22)
+p1+p2
+ggsave("~/figures/fuh1/20240609_e1113_DNA_integrate_map.pdf",width=10,height=5)
+```
+
+### DIFFERENTIAL gene and VMR between E11 and E13
+```{R}
+trA.integrated <- spatial.obj
+#DefaultAssay(trA.integrated) <- "RNA_smooth"
+trA.integrated$celltype.stim <- paste(trA.integrated$seurat_clusters, trA.integrated$orig.ident, sep = "_")
+Idents(trA.integrated) <- "celltype.stim"
+trA.integrated[['SCT']] = trA.integrated[["integrated"]]
+trA_differential <- FindMarkers(trA.integrated,assay="RNA_smooth_sep",ident.1 = "8_E11", ident.2 = "8_E13", verbose = FALSE)
+# DNAm_mapped_genes <- Methylation_genes(rownames(trA.integrated@assays$DNAm_frac_smooth))
+# trA_differential_selected <- trA_differential[which(rownames(trA_differential) %in% DNAm_mapped_genes[,1]),] 
+#DefaultAssay(trA.integrated) <- "DNAm_smooth"
+trA_differential_DNA <- FindMarkers(trA.integrated,assay="DNA_smooth_Sep",ident.1 = "8_E11", ident.2 = "8_E13", verbose = FALSE)
+trA_differential_DNA_genes <- Methylation_genes(rownames(trA_differential_DNA))
+trA_differential_DNA_genes$VMR <- rownames(trA_differential_DNA_genes)
+trA_differential_DNA_genes <- trA_differential_DNA_genes[!duplicated(trA_differential_DNA_genes[,1]),]
+idx <- which(trA_differential_DNA_genes$geneSymbols %in% rownames(trA_differential))
+methylation_mapped <- rownames(trA_differential_DNA_genes)[idx]
+trA_differential_DNA <- trA_differential_DNA[which(rownames(trA_differential_DNA) %in% methylation_mapped),]
+rownames(trA_differential_DNA) <- trA_differential_DNA_genes[rownames(trA_differential_DNA),]$geneSymbols
+idx <- match(rownames(trA_differential_DNA),rownames(trA_differential))
+trA_differential <- trA_differential[idx,]
+positive_log_fold <- which(trA_differential$avg_log2FC > 0)
+#trA_differential_DNA$p_val_adj[positive_log_fold] <- -trA_differential_DNA$p_val_adj[positive_log_fold]
+trA_differential$log10_adjust <- -log10(trA_differential$p_val_adj)
+trA_differential$log10_adjust[positive_log_fold] <- -trA_differential$log10_adjust[positive_log_fold]
+positive_log_fold <- which(trA_differential_DNA$avg_log2FC > 0)
+#trA_differential_DNA$p_val_adj[positive_log_fold] <- -trA_differential_DNA$p_val_adj[positive_log_fold]
+trA_differential_DNA$log10_adjust <- -log10(trA_differential_DNA$p_val_adj)
+trA_differential_DNA$log10_adjust[positive_log_fold] <- -trA_differential_DNA$log10_adjust[positive_log_fold]
+differential_dataframe <- as.data.frame(cbind(trA_differential$log10_adjust,trA_differential_DNA$log10_adjust))
+colnames(differential_dataframe) <- c("y","x")
+rownames(differential_dataframe) <- rownames(trA_differential)
+labels_data <- differential_dataframe[row.names(differential_dataframe) %in% c("Usp9x","Ank3","Mecp2","Ror1","Akap6","Map2"), ]
+ggplot(differential_dataframe, aes(x = x, y = y)) +
+  geom_point(aes(color = ifelse(x < -7.3 & y > 7.3, "blue", 
+                                ifelse(x > 7.3 & y > 7.3, "red", "Dark Olive Green")))) +
+  labs(title = "", x = "+/- log10(P) DNAm", y = "+/- log10(P) RNA") +
+  theme_bw() + xlim(-50,50)+ylim(-50,50)+theme(panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") + theme(legend.position="None")+
+  scale_color_identity()
+  #geom_text(data = labels_data, aes(label = row.names(labels_data), vjust = 0.8))
+#ggsave("~/figures/fuh1/20240610_scatter_neuron.pdf",width=4,height=5)
+RNA_genes <- rownames(differential_dataframe %>% filter(x < -1.3,y > 1.3))
+Methylation_VMR <- trA_differential_DNA_genes %>% filter(geneSymbols %in% RNA_genes)
+Methylation_VMR <- Methylation_VMR[match(RNA_genes, Methylation_VMR$geneSymbols),]
+E11_idx <- which(trA.integrated$celltype.stim == "8_E11")
+E13_idx <- which(trA.integrated$celltype.stim == "8_E13")
+E11_RNA <- trA.integrated@assays$RNA_smooth_sep$data[RNA_genes,E11_idx]
+E13_RNA <- trA.integrated@assays$RNA_smooth_sep$data[RNA_genes,E13_idx]
+E11_DNA <- trA.integrated@assays$DNA_smooth_Sep$data[Methylation_VMR$VMR,E11_idx]
+E13_DNA <- trA.integrated@assays$DNA_smooth_Sep$data[Methylation_VMR$VMR,E13_idx]
+matrix1 <- E11_DNA
+matrix2 <- E13_DNA
+combined_matrix <- as.matrix(cbind(matrix1,matrix2))
+#combined_matrix <- t(apply(combined_matrix, 1, function(x) (x - mean(x)) / sd(x)))
+matrix1 <- rowMeans(combined_matrix[,1:ncol(E11_DNA)])
+matrix2 <- rowMeans(combined_matrix[,(ncol(E11_DNA)+1):ncol(combined_matrix)])
+combined_matrix <- as.matrix(cbind(matrix1,matrix2))
+colnames(combined_matrix) <- c("E11","E13")
+my_col <- colorRampPalette(c("#759DDB","white","#E89653"))(100)
+pdf("~/figures/fuh1/20240611_E1113_demethylated_level_heart.pdf",width=3,height=5)
+Heatmap(combined_matrix, 
+        name = "Methylation Level",
+        column_names_side = "top",
+        show_row_names = FALSE,
+        show_column_names = TRUE,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        col = my_col)
+dev.off()
+matrix1 <- E11_RNA
+matrix2 <- E13_RNA
+combined_matrix <- as.matrix(cbind(matrix1,matrix2))
+combined_matrix <- t(apply(combined_matrix, 1, function(x) (x - mean(x)) / sd(x)))
+matrix1 <- rowMeans(combined_matrix[,1:ncol(E11_RNA)])
+matrix2 <- rowMeans(combined_matrix[,(ncol(E11_RNA)+1):ncol(combined_matrix)])
+combined_matrix <- as.matrix(cbind(matrix1,matrix2))
+colnames(combined_matrix) <- c("E11","E13")
+my_col <- colorRampPalette(c("#05436C","white","#DB5E52"))(100)
+pdf("~/figures/fuh1/20240611_E1113_RNA_upregulated_heart.pdf",width=3,height=5)
+Heatmap(combined_matrix, 
+        name = "Expression Z Score",
+        column_names_side = "top",
+        show_row_names = FALSE,
+        show_column_names = TRUE,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        col = my_col)
+dev.off()
+testing_Gene <- rownames(differential_dataframe %>% filter(x > 7.3 & y > 7.3))
+#saveRDS(testing_Gene,"~/intermediate/temp.rds")
+```
+
+### Gene ontology result
+```{r}
+library(enrichplot)
+library(clusterProfiler)
+library(DOSE)
+library(org.Mm.eg.db)
+genes <- testing_Gene
+ego <- enrichGO(gene = genes,
+                OrgDb = org.Mm.eg.db,
+                keyType = 'SYMBOL',
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+## Plot results
+p <- dotplot(ego, showCategory=20)
+p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               panel.background = element_blank(), axis.line = element_line(colour = "black"))
+ggsave("~/figures/fuh1/20240610_heart_upregulated_demethylated_go.pdf",width=6,height=7)
+```
+
+### Spatial plot
+```{r}
+Gene_symbol <- c("Usp9x","Ank3","Mecp2","Shank2")
+Gene_symbol <- c("Ctnna1","Pecam1","Lamb1")
+Gene_name <- "Nav3"
+E11_idx <- which(trA.integrated$orig.ident == "E11")
+E13_idx <- which(trA.integrated$orig.ident == "E13")
+d1 <- trA.integrated@assays$RNA_smooth$data[Gene_name,E11_idx]
+d2 <- trA.integrated@assays$RNA_smooth$data[Gene_name,E13_idx]
+p1 <- spatial_plot(d1,e11_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_fill_gradientn(colors = jdb_palette("solar_extra"),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(fill = paste0(Gene_name))
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=22) 
+p2 <- spatial_plot(d2,e13_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_fill_gradientn(colors = jdb_palette("solar_extra"),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(fill = paste0(Gene_name))
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=22) 
+p1+p2
+#ggsave(paste0("~/figures/fuh1/20240607_",Gene_name,".pdf"),width=8,height=4)
+Methylation_name <- rownames(trA_differential_DNA_genes %>% filter(geneSymbols == Gene_name))
+d1 <- trA.integrated@assays$DNA_smooth$data[Methylation_name,E11_idx]
+d2 <- trA.integrated@assays$DNA_smooth$data[Methylation_name,E13_idx]
+p3 <- spatial_plot(d1,e11_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_fill_gradientn(colors = jdb_palette("brewer_yes"),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(fill = "")+ggtitle(Methylation_name)
+p3$layers[[1]]$aes_params <- c(p3$layers[[1]]$aes_params, shape=22) 
+p4 <- spatial_plot(d2,e13_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_fill_gradientn(colors = jdb_palette("brewer_yes"),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(fill = "")+ggtitle(Methylation_name)
+p4$layers[[1]]$aes_params <- c(p4$layers[[1]]$aes_params, shape=22) 
+g1 <- ggplotGrob(p1)
+g2 <- ggplotGrob(p2)
+g3 <- ggplotGrob(p3)
+g4 <- ggplotGrob(p4)
+maxWidth <- unit.pmax(g1$widths[2:5], g2$widths[2:5], g3$widths[2:5], g4$widths[2:5])
+g1$widths[2:5] <- maxWidth
+g2$widths[2:5] <- maxWidth
+g3$widths[2:5] <- maxWidth
+g4$widths[2:5] <- maxWidth
+maxHeight <- unit.pmax(g1$heights[2:5], g2$heights[2:5], g3$heights[2:5], g4$heights[2:5])
+g1$heights[2:5] <- maxHeight
+g2$heights[2:5] <- maxHeight
+g3$heights[2:5] <- maxHeight
+g4$heights[2:5] <- maxHeight
+g <- grid.arrange(p1, p2, p3, p4, nrow = 2, ncol = 2)
+ggsave(paste0("~/figures/fuh1/20240607_",Gene_name,".pdf"),g,width=8,height=8)
+```
+
+### Violin plot
+```{r}
+DefaultAssay(trA.integrated) <- "RNA_smooth_sep"
+violinplot <- VlnPlot(trA.integrated, features = Gene_symbol,group.by = "orig.ident",idents=c("8_E11","8_E13"),pt.size = 0, combine=FALSE) 
+violinplot <- lapply(violinplot, function(x){
+            x + theme(legend.position = "none",
+            axis.title.x = element_blank())+scale_fill_manual(values = c("#6C8FC6","#F7776E"))})
+combined_plot <- CombinePlots(violinplot, ncol = 1)
+#g <- grid.arrange(violinplot[[1]],violinplot[[2]],violinplot[[3]], nrow = 3, ncol = 1)
+ggsave(paste0("~/figures/fuh1/20240613_violin_RNA.pdf"),combined_plot,width=3,height=11)
+Methylation_list <- trA_differential_DNA_genes %>% filter(geneSymbols %in% Gene_symbol)
+Methylation_list <- Methylation_list[match(Gene_symbol, Methylation_list$geneSymbols),]
+DefaultAssay(trA.integrated) <- "DNA_smooth_Sep"
+violinplot <- VlnPlot(trA.integrated, rownames(Methylation_list),group.by = "orig.ident",idents=c("8_E11","8_E13"),pt.size = 0, combine=FALSE)
+violinplot <- lapply(violinplot, function(x){
+            x + theme(legend.position = "none",plot.title = element_text(size=9),
+            axis.title.x = element_blank())+scale_fill_manual(values = c("#6C8FC6","#F7776E"))+ylab("Methylation Level")})
+combined_plot <- CombinePlots(violinplot, ncol = 1)
+ggsave(paste0("~/figures/fuh1/20240613_violin_DNA.pdf"),combined_plot,width=3,height=11)
+```
+
+compare spatial map based on integrated Seurat 
+```{r}
+split_e1113 <- SplitObject(trA.integrated, split.by = "orig.ident")
+e11_wnn_split <- split_e1113[[1]]
+e13_wnn_split <- split_e1113[[2]]
+
+Idents(trA.integrated) <- "celltype.stim"
+trA_differential_all <- FindMarkers(trA.integrated,assay="RNA_smooth",ident.1 = "2_E11", ident.2 = "2_E13",verbose = FALSE)
+trA_differential_all_positive <- trA_differential_all[which(trA_differential_all$avg_log2FC > 0),]
+
+trA_differential_all_DNA <- FindMarkers(trA.integrated,assay="DNAm_frac_smooth",ident.1 = "2_E11", ident.2 = "2_E13",verbose = FALSE)
+trA_differential_all_DNA_positive <- trA_differential_all_DNA[which(trA_differential_all_DNA$avg_log2FC > 0),]
+trA_differential_all_DNA_negative <- trA_differential_all_DNA[which(trA_differential_all_DNA$avg_log2FC < 0),]
+
+trA_differential_all_DNA_genes_positive <- Methylation_genes(rownames(trA_differential_all_DNA_positive)) 
+trA_differential_all_DNA_genes_overlap <- rownames(trA_differential_all_DNA_genes_positive)[which(trA_differential_all_DNA_genes_positive[,1] %in% rownames(trA_differential_all))]
+
+trA_differential_all_DNA_genes_negative <- Methylation_genes(rownames(trA_differential_all_DNA_negative)) 
+trA_differential_all_DNA_genes_overlap <- rownames(trA_differential_all_DNA_genes_negative)[which(trA_differential_all_DNA_genes_negative[,1] %in% rownames(trA_differential_all))]
+
+trA_differential_all_DNA_genes_overlap_genes <- trA_differential_all_DNA_genes_negative[trA_differential_all_DNA_genes_overlap[1:100],]
+
+DefaultAssay(trA.integrated) <- "RNA_smooth"
+violinplot <- VlnPlot(trA.integrated, features = c("Usp9x","Reln","Lmo3"),group.by = "orig.ident",idents=c("2_E11","2_E13"),pt.size = 0, combine=TRUE) + theme(legend.position = "None")
+violinplot
+#g <- grid.arrange(violinplot[[1]],violinplot[[2]],violinplot[[3]], nrow = 3, ncol = 1)
+ggsave(paste0("~/figures/fuh1/20240605_violin_RNA.pdf"),g,width=3,height=6)
+
+DefaultAssay(trA.integrated) <- "DNAm_frac_smooth"
+violinplot <- VlnPlot(trA.integrated, Methylation_list_neuron,group.by = "orig.ident",idents=c("2_E11","2_E13"),pt.size = 0, combine=TRUE)
+#g <- grid.arrange(violinplot[[1]],violinplot[[2]],violinplot[[3]], nrow = 3, ncol = 1)
+ggsave(paste0("~/figures/fuh1/20240605_violin_DNA.pdf"),g,width=3,height=6)
+
+Gene_name_list_neuron <- c("Usp9x","Reln","Lmo3","Dclk1")
+Methylation_list_neuron <- c("chrX.13109556.13113456","chr5.22250042.22252442","chr6.138529251.138532051","chr3.55317075.55319775")
+
+Gene_name_list_heart <- c("Usp9x","Reln","Lmo3","Dclk1")
+Methylation_list_heart <- c("chrX.13109556.13113456","chr5.22250042.22252442","chr6.138529251.138532051","chr3.55317075.55319775")
+
+Gene_name <- "Mecp2"
+d1 <- e11_wnn_split@assays$RNA$data[Gene_name,]
+d2 <- e13_wnn_split@assays$RNA$data[Gene_name,]
+p1 <- spatial_plot(d1,e11_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11, "RdYlBu")),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(color = paste0(Gene_name))
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=15) 
+
+p2 <- spatial_plot(d2,e13_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11, "RdYlBu")),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(color = paste0(Gene_name))
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=15) 
+p1+p2
+
+#ggsave("~/figures/fuh1/20240604_Differential_gene.pdf",width=6,height=4)
+
+
+Methylation_name <- trA_differential_all_DNA_genes_overlap[which(trA_differential_all_DNA_genes_overlap_genes == Gene_name)][1]
+d1 <- e11_wnn_split@assays$DNAm_frac_smooth$data[Methylation_name,]
+d2 <- e13_wnn_split@assays$DNAm_frac_smooth$data[Methylation_name,]
+p3 <- spatial_plot(d1,e11_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11, "RdYlBu")),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(color = "")+ggtitle(Methylation_name)
+p1$layers[[1]]$aes_params <- c(p1$layers[[1]]$aes_params, shape=15) 
+
+p4 <- spatial_plot(d2,e13_barcode,continuous=TRUE)+
+  theme(legend.position = "right", legend.text=element_text(size=12), legend.title=element_text(size=12))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(11, "RdYlBu")),na.value = "white",limits = c(min(c(min(d1),min(d2))),max(c(max(d1),max(d2)))))+ labs(color = "")+ggtitle(Methylation_name)
+p2$layers[[1]]$aes_params <- c(p2$layers[[1]]$aes_params, shape=15) 
+
+g <- grid.arrange(p1, p2, p3, p4, nrow = 2, ncol = 2)
+ggsave(paste0("~/figures/fuh1/20240605_",Gene_name,".pdf"),g,width=6,height=6)
+
+
+Idents(trA.integrated) <- "orig.ident"
+trA_differential_all <- FindMarkers(trA.integrated,assay="SCT",ident.1 = "E11", ident.2 = "E13",verbose = FALSE)
+
+EnhancedVolcano(trA_differential_all_DNA, 
+                rownames(trA_differential_all_DNA),
+                x ="avg_log2FC", 
+                y ="p_val_adj",legendPosition = "None",title = "",
+                subtitle = "",pointSize = 1.3,
+                labSize = 4, caption ="",axisLabSize = 13,colAlpha = 1)+ theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank()
+)
+```
+
+
+
+
+
