@@ -65,9 +65,9 @@ To obtain CH levels:
 
 (5)`biscuit_qc_all`: Quality check for alignment and methylation calling. 
 
-(6)`feature_mean_all`: Run enrichment testing using YAME.
+(6)`feature_mean_all`: Obtain average methylation over selected windows.
 
-(7)`biscuit_pileup_allc_all`: Identifies all the CH and call the methylation at those sites.
+(7)`biscuit_pileup_allc_all`: Identify all the CH and call the methylation at those sites.
 
 #### - For Image processing: 
 Identify the location of pixels on tissue from the brightfield image using tissue_positions_list.py.
