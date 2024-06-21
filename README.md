@@ -24,7 +24,7 @@ For RNA: Change all the directories in the Snakefile To obtain RNA count matrice
 
 Descriptions:
 
-(1) Setup of Directories and Files. This automates the generation of directories to hold each sample's raw and processed data. 
+(1) Setup of directories and files: Automates the generation of directories to hold each sample's raw and processed data. 
 
 (2)`filter_primer`: Uses bbduk to eliminate sequences containing primers from the reads.
 
