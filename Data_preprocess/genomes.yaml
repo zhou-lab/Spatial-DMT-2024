@@ -1,0 +1,27 @@
+mm10:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/mm10/
+  BWA: bwa/mm10.fa
+  BISCUIT_INDEX: biscuit/mm10.fa
+  BISMARK_BT2_INDEX: bismark_bt2
+  STAR_INDEX: STAR
+  GTF: annotation/gtf/Mus_musculus.GRCm38.82.gtf.UCSCnaming
+  REF_FASTA: mm10.fa
+  CPG_BED: annotation/cpg/cpg.bed.gz
+  CPG_STRANDED_BED: annotation/cpg/cpgStranded_nocontig.bed.gz
+  ALLC_BED: annotation/allc/allc.bed.gz
+  ALLC_CR: annotation/allc/allc.cr
+  CPA_BED: annotation/allc/ca.bed.gz
+  CAC_BED: annotation/allc/cac.bed3.gz
+  BISCUIT_QCASSET: biscuit/QC/
+  CPG_BED_LAMBDA: --
+hg38:
+  REF_BASE: /mnt/isilon/zhou_lab/projects/20191221_references/hg38/
+  BISCUIT_INDEX: biscuit/hg38.fa
+  REF_FASTA: hg38.fa
+  ALLC_BED: annotation/allc/allc.bed.gz
+  CPG_BED: annotation/cpg/cpg_nocontig.bed.gz
+  CPA_BED: annotation/allc/ca.bed.gz
+  CAC_BED: annotation/allc/cac.bed3.gz
+  BISCUIT_QCASSET: biscuit/QC/
+  ALLC_CR: annotation/allc/allc.cr
+  CPG_BED_LAMBDA: --
