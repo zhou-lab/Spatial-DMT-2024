@@ -6,15 +6,49 @@ This repository is for raw data processing and downstream data analysis & visual
 ![](https://github.com/dyxmvp/Spatial-DMT-2024/blob/main/workflow/Analysis_pipeline.jpg)
 
 ## Data analysis instructions
-### Dependiencies
-* [Snakemake](https://snakemake.readthedocs.io/en/stable/index.html)
-* [Biopython](https://biopython.org/docs/1.75/api/index.html)
-* [Python3]( https://docs.python.org/3/using/unix.html)
-* [BISCUIT](https://huishenlab.github.io/biscuit/#download-and-install)
-* [bedtools](https://bedtools.readthedocs.io/en/latest/content/installation.html)
-* [awk](https://manpages.ubuntu.com/manpages/trusty/man1/awk.1posix.html)
-* [STAR](https://github.com/alexdobin/STAR)
-* [bbduk](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/)
+### Dependencies
+
+All dependencies can be installed via [conda](https://docs.conda.io/en/latest/) (bioconda/conda-forge channels) except BBTools, which is available via [Homebrew](https://brew.sh/) on macOS or direct download on Linux.
+
+**Install via conda:**
+```bash
+conda install -c conda-forge -c bioconda \
+    snakemake=9.19.0 \
+    star=2.7.11b \
+    biscuit=1.7.1 \
+    samtools=1.22.1 \
+    htslib=1.22.1 \
+    bedtools=2.31.1 \
+    dupsifter=1.3.0 \
+    yame=1.9 \
+    pigz=2.8 \
+    parallel=20260422
+```
+
+**Install BBTools (provides `bbduk.sh`) separately:**
+```bash
+# macOS (Homebrew)
+brew install bbtools   # tested: 39.81b
+
+# Linux
+# Download from https://jgi.doe.gov/data-and-tools/software-tools/bbtools/
+```
+
+| Tool | Version tested | Source |
+|------|---------------|--------|
+| [Snakemake](https://snakemake.readthedocs.io/) | 9.19.0 | conda-forge |
+| [STAR](https://github.com/alexdobin/STAR) / STARsolo | 2.7.11b | bioconda |
+| [BISCUIT](https://huishenlab.github.io/biscuit/) | 1.7.1 | bioconda |
+| [samtools](https://www.htslib.org/) | 1.22.1 | bioconda |
+| bgzip / tabix (htslib) | 1.22.1 | bioconda |
+| [bedtools](https://bedtools.readthedocs.io/) | 2.31.1 | bioconda |
+| [dupsifter](https://github.com/huishenlab/dupsifter) | 1.3.0 | bioconda |
+| [yame](https://github.com/zhou-lab/yame) | 1.9 | bioconda |
+| [pigz](https://zlib.net/pigz/) | 2.8 | conda-forge |
+| [GNU parallel](https://www.gnu.org/software/parallel/) | 20260422 | conda-forge |
+| [BBTools](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/) (bbduk) | 39.81b | Homebrew / direct |
+| [Python](https://www.python.org/) | 3.x | conda-forge |
+| [Biopython](https://biopython.org/) | — | conda-forge |
 
 ### 1. Data preprocessing
 Next Generation Sequencing (NGS) was performed using an Illumina NovaSeq 6000 sequencer (150bp paired-end mode). Read 1 contains the genome sequences, and Read 2 contains the spatial Barcode A & B and UMIs (mRNA).

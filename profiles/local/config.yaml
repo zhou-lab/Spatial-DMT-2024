@@ -1,0 +1,9 @@
+default-resources:
+  - time="01:00:00"
+  - mem="10G"
+  - cpus_per_task=1
+jobs: 4 # Default to 4 for local workstation, can be overridden
+printshellcmds: True
+latency-wait: 100
+reason: True
+rerun-triggers: mtime
