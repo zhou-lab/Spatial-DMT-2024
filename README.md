@@ -104,7 +104,7 @@ To obtain CH levels:
 (7)`biscuit_pileup_allc_all`: Identify all the CH and call the methylation at those sites.
 
 #### - For Image processing: 
-Identify the location of pixels on tissue from the brightfield image using tissue_positions_list.py.
+This python script processes a phase contrast tissue image to generate spatial metadata similar to 10x Visium outputs. It first converts the image to grayscale and applies adaptive thresholding to create a binary mask that distinguishes tissue from background. The image is then divided into a fixed 50×50 grid, and each grid cell is evaluated to determine whether it contains tissue based on a pixel intensity threshold. Detected tissue spots are matched with predefined spatial barcodes, and the results are compiled into output files, including a tissue positions CSV, a scale factors JSON, and a visualization image with highlighted tissue regions.
 
 ### 2. Downstream data analysis and visualization 
 
