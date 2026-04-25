@@ -12,6 +12,11 @@ default-resources:
   - time="01:00:00"
   - mem="10G"
   - cpus_per_task=1
+
+REF_DIR: "/mnt/isilon/zhou_lab/projects/20191221_references/"
+BBDUK: "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
+CONDA_ENV: "source activate_2022 Bio &&"
+
 jobs: 100
 printshellcmds: True
 latency-wait: 100

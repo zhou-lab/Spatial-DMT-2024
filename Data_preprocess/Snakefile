@@ -32,13 +32,18 @@ elif GENOME.startswith("mm10"):
 else:
     raise ValueError(f"Unsupported genome: {GENOME}. Must be hg38 or mm10 based.")
 
-LAMBDA_REF_BASE = "/mnt/isilon/zhou_lab/projects/20191221_references/Lambda/"
-LAMBDA_REF_FASTA = LAMBDA_REF_BASE + "J02459.fa"
-LAMBDA_BISCUIT_INDEX = LAMBDA_REF_BASE + "biscuit/J02459.fa"
+# Reference and Software configuration
+REF_DIR = config.get("REF_DIR", "/mnt/isilon/zhou_lab/projects/20191221_references/")
+LAMBDA_REF_BASE = os.path.join(REF_DIR, "Lambda/")
+LAMBDA_REF_FASTA = os.path.join(LAMBDA_REF_BASE, "J02459.fa")
+LAMBDA_BISCUIT_INDEX = os.path.join(LAMBDA_REF_BASE, "biscuit/J02459.fa")
 
 # RNA software/paths
-bbduk_dir = "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
-STAR_REF_DIR = f"/mnt/isilon/zhou_lab/projects/20191221_references/{GENOME_FOR_PATH}/STAR"
+bbduk_dir = config.get("BBDUK", "bbduk.sh") # Default to PATH if not specified
+STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
+
+# Environment setup (optional)
+CONDA_ENV = config.get("CONDA_ENV", "") # e.g., "source activate_2022 Bio &&"
 
 # Helper function to find fastq files (supporting both .fq and .fq.gz)
 def get_fastq(wildcards, prefix):
@@ -90,9 +95,7 @@ rule dna_trim_and_demux:
         $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_1
         $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_2
 
-        source activate_2022 Bio
-
-        parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
+        {CONDA_ENV} parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
             python {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
@@ -140,8 +143,8 @@ rule dna_biscuit_align:
         time = "96:00:00",
         cpus_per_task = 48,
     params:
-        biscuit_index = ref["REF_BASE"]+ref["BISCUIT_INDEX"],
-        ref_fasta = ref["REF_BASE"]+ref["REF_FASTA"],
+        biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
+        ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
     shell:
         """
         set -xe
@@ -168,8 +171,8 @@ rule dna_biscuit_pileup:
         time = "48:00:00",
         cpus_per_task = 48,
     params:
-        ref_fasta = ref["REF_BASE"]+ref["REF_FASTA"],
-        cpg_bed = ref["REF_BASE"]+ref["CPG_BED"],
+        ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+        cpg_bed = os.path.join(REF_DIR, ref["REF_BASE"], ref["CPG_BED"]),
     shell:
         """
         set -xe
@@ -188,7 +191,7 @@ rule dna_biscuit_pileup:
                 LC_ALL=C sort -k1,1 -k2,2n | \
                 biscuit mergecg {params.ref_fasta} - | \
                 bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
-                awk -v OFS="\\t" -F"\\t" -f wanding.awk -e '{{ M=round($7*$8); print M,$8-M;}}' | \
+                awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk -e '{{ M=round($7*$8); print M,$8-M;}}' | \
                 yame pack -f 3 - ;
         }}
         export -f vcf2cg
@@ -310,7 +313,7 @@ rule rna_star_solo:
         cpus_per_task = 24,
     shell:
         """
-        module load STAR || true
+        if command -v module >/dev/null 2>&1; then module load STAR || true; fi
         mkdir -p pipeline_output/{wildcards.sample}/rna_processed/align/
         STAR --runThreadN {resources.cpus_per_task} \
         --genomeDir {STAR_REF_DIR} \
