@@ -1,0 +1,332 @@
+import os
+import glob
+
+# Support both --profile (where data is in config[ref]) 
+# and --configfile (where data might be in config["config"][ref])
+if config.get("ref") in config:
+    ref = config[config["ref"]]
+elif "config" in config and config.get("ref") in config["config"]:
+    ref = config["config"][config["ref"]]
+elif "ref" in config:
+    # This handles the case where ref is provided via --config ref=... 
+    # but the genome blocks were loaded via configfile
+    target_ref = config["ref"]
+    if target_ref in config:
+        ref = config[target_ref]
+    elif "config" in config and target_ref in config["config"]:
+        ref = config["config"][target_ref]
+    else:
+        raise ValueError(f"Genome reference '{target_ref}' not found in config.")
+else:
+    # Default fallback for initialization
+    ref = {}
+
+GENOME = config.get("ref", "unknown")
+
+
+# Sample identification
+if "IDS" in config:
+    SAMPLES = config["IDS"].split(",")
+else:
+    # Assuming the structure: fastq/{sample}/DNA_1.fq[.gz] and fastq/{sample}/RNA_1.fq[.gz]
+    DNA_FILES = glob.glob(os.path.join("fastq", "*/DNA_1.fq*"))
+    SAMPLES = sorted(list(set([os.path.dirname(f).split(os.sep)[-1] for f in DNA_FILES])))
+
+print(f"Detected samples: {SAMPLES} in fastq/")
+
+# Genome-specific paths
+if GENOME.startswith("hg38"):
+    GENOME_FOR_PATH = "hg38"
+elif GENOME.startswith("mm10"):
+    GENOME_FOR_PATH = "mm10"
+else:
+    raise ValueError(f"Unsupported genome: {GENOME}. Must be hg38 or mm10 based.")
+
+LAMBDA_REF_BASE = "/mnt/isilon/zhou_lab/projects/20191221_references/Lambda/"
+LAMBDA_REF_FASTA = LAMBDA_REF_BASE + "J02459.fa"
+LAMBDA_BISCUIT_INDEX = LAMBDA_REF_BASE + "biscuit/J02459.fa"
+
+# RNA software/paths
+bbduk_dir = "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
+STAR_REF_DIR = f"/mnt/isilon/zhou_lab/projects/20191221_references/{GENOME_FOR_PATH}/STAR"
+
+# Helper function to find fastq files (supporting both .fq and .fq.gz)
+def get_fastq(wildcards, prefix):
+    sample_dir = os.path.join("fastq", wildcards.sample)
+    for ext in [".fq.gz", ".fq", ".fastq.gz", ".fastq"]:
+        path = os.path.join(sample_dir, prefix + ext)
+        if os.path.exists(path):
+            return path
+    # Fallback for Snakemake reporting
+    return os.path.join(sample_dir, prefix + ".fq")
+
+rule all:
+    input:
+        # DNA outputs
+        expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
+        # RNA outputs
+        expand("pipeline_output/{sample}/rna_processed/align/Aligned.out.sam", sample=SAMPLES)
+
+################################################################################
+# DNA Pipeline Rules
+################################################################################
+
+rule dna_trim_and_demux:
+    input:
+        r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
+        r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
+        wl = "fastq/{sample}/spatial_barcodes.txt",
+    output:
+        r1_out = "pipeline_output/{sample}/trim/{sample}_R1.fq.gz",
+        r2_out = "pipeline_output/{sample}/trim/{sample}_R2.fq.gz",
+        lambda_r1 = "pipeline_output/{sample}/trim/{sample}_Lambda_R1.fq.gz",
+        lambda_r2 = "pipeline_output/{sample}/trim/{sample}_Lambda_R2.fq.gz",
+        dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
+    resources:
+        mem = "140G",
+        time = "120:00:00",
+        cpus_per_task = 12,
+    shell:
+        """
+        ulimit -n 65535
+        set -xeo pipefail
+        mkdir -p pipeline_output/{wildcards.sample}/trim/ pipeline_output/{wildcards.sample}/dmux/ 
+        
+        CAT_CMD1="cat"
+        if [[ {input.r1} == *.gz ]]; then CAT_CMD1="pigz -dc"; fi
+        CAT_CMD2="cat"
+        if [[ {input.r2} == *.gz ]]; then CAT_CMD2="pigz -dc"; fi
+
+        $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_1
+        $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_2
+
+        source activate_2022 Bio
+
+        parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
+            f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
+            d=$(dirname "$f"); f2="$d/_chunk_2$cid"
+            python Data_preprocess/Spatial-Methylation/spatialmeth_trimadapters.py \
+                "$f" "$f2" \
+                -o pipeline_output/{wildcards.sample}/trim/_out_"$cid" \
+                -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
+                    AATCATACACCAATACAAAACATCAACCAC \
+                    CAAATACTCTAACCTCTCAAACACATAAAT \
+                --whitelist {input.wl} \
+                --whitelist_col 4 \
+                --dmux_dir pipeline_output/{wildcards.sample}/dmux \
+                --chunk_id "$cid" \
+                --bc-mismatch 1
+        ' ::: pipeline_output/{wildcards.sample}/trim/_chunk_1*
+        
+        :> {output.r1_out}
+        :> {output.r2_out}
+        :> {output.lambda_r1}
+        :> {output.lambda_r2}
+        for f in $(ls pipeline_output/{wildcards.sample}/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.r1_out}
+            cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
+        done
+        for f in $(ls pipeline_output/{wildcards.sample}/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.lambda_r1}
+            cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
+        done
+
+        cut -f1 pipeline_output/{wildcards.sample}/dmux/*_R1_dmux.*.txt | sort -u | while read bc; do
+            cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
+            cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
+        done
+        parallel -j 12 'gzip -f {{}}' ::: pipeline_output/{wildcards.sample}/dmux/*_R1.fq pipeline_output/{wildcards.sample}/dmux/*_R2.fq
+        rm -f pipeline_output/{wildcards.sample}/trim/_chunk_* pipeline_output/{wildcards.sample}/trim/_out_*
+        touch {output.dmux_done}
+        """
+
+rule dna_biscuit_align:
+    input:
+        dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
+    output:
+        align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
+    resources:
+        mem = "150G",
+        time = "96:00:00",
+        cpus_per_task = 48,
+    params:
+        biscuit_index = ref["REF_BASE"]+ref["BISCUIT_INDEX"],
+        ref_fasta = ref["REF_BASE"]+ref["REF_FASTA"],
+    shell:
+        """
+        set -xe
+        mkdir -p pipeline_output/{wildcards.sample}/bam/
+        :>{output.align_txt}
+        for fq1 in pipeline_output/{wildcards.sample}/dmux/*_R1.fq.gz; do
+            barcode=$(basename $fq1 _R1.fq.gz);
+            out_dup=pipeline_output/{wildcards.sample}/bam/${{barcode}}.dupsifter.stat
+            out_bam=pipeline_output/{wildcards.sample}/bam/${{barcode}}.bam
+            biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} pipeline_output/{wildcards.sample}/dmux/${{barcode}}_R2.fq.gz $fq1 | dupsifter --stats-output $out_dup {params.ref_fasta} | samtools sort -T ${{out_bam}}_tmp -O bam -o $out_bam
+            samtools index $out_bam
+            echo $barcode >> {output.align_txt}
+        done
+        """
+
+rule dna_biscuit_pileup:
+    input:
+        align_txt = "pipeline_output/{sample}/dmux/align_list.txt"
+    output:
+        cg = "pipeline_output/{sample}/pileup/{sample}.cg",
+        idx = "pipeline_output/{sample}/pileup/{sample}.cg.idx",
+    resources:
+        mem = "120G",
+        time = "48:00:00",
+        cpus_per_task = 48,
+    params:
+        ref_fasta = ref["REF_BASE"]+ref["REF_FASTA"],
+        cpg_bed = ref["REF_BASE"]+ref["CPG_BED"],
+    shell:
+        """
+        set -xe
+        mkdir -p pipeline_output/{wildcards.sample}/pileup/
+        tmp_pileup=tmp/pileup/{wildcards.sample}/
+        mkdir -p $tmp_pileup
+        for bam in pipeline_output/{wildcards.sample}/bam/*.bam; do
+            barcode=$(basename $bam .bam)
+            out_vcf=$tmp_pileup/$barcode.vcf.gz
+            biscuit pileup -m 0 -a 0 -c -u -p -@ {resources.cpus_per_task} {params.ref_fasta} $bam | bgzip -c > $out_vcf
+            tabix -p vcf $out_vcf
+        done
+
+        vcf2cg() {{
+            biscuit vcf2bed -k 1 -t cg $1 | cut -f1-5 | \
+                LC_ALL=C sort -k1,1 -k2,2n | \
+                biscuit mergecg {params.ref_fasta} - | \
+                bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
+                awk -v OFS="\\t" -F"\\t" -f wanding.awk -e '{{ M=round($7*$8); print M,$8-M;}}' | \
+                yame pack -f 3 - ;
+        }}
+        export -f vcf2cg
+        parallel -j {resources.cpus_per_task} 'vcf2cg {{}} > '$tmp_pileup'/{{/%.vcf.gz}}.cg' ::: $tmp_pileup/*.vcf.gz
+        
+        :>{output.cg}
+        for cg_file in $tmp_pileup/*.cg; do
+            barcode=$(basename $cg_file .cg)
+            cat $cg_file >> {output.cg}
+            yame index -1 $barcode {output.cg}
+        done
+        """
+
+################################################################################
+# RNA Pipeline Rules
+################################################################################
+
+rule rna_filter_primer:
+    input:
+        in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
+        in2 = lambda wildcards: get_fastq(wildcards, "RNA_2")
+    output:
+        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
+        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_primer.fastq.gz"
+    resources:
+        mem = "40G",
+        time = "12:00:00",
+        cpus_per_task = 12,
+    shell:
+        """
+        mkdir -p pipeline_output/{wildcards.sample}/rna_processed/tmp/ pipeline_output/{wildcards.sample}/rna_processed/qc/
+        {bbduk_dir} \
+        in1={input.in1} \
+        in2={input.in2} \
+        outm1={output.out1} \
+        outm2={output.out2} \
+        k=22 mm=f rcomp=f restrictleft=30 skipr1=t \
+        hdist=2 \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.primer.txt \
+        threads={resources.cpus_per_task} \
+        literal=CAAGCGTTGGCTTCTCGCATCT
+        """
+
+rule rna_filter_L1:
+    input:
+        in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
+        in2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_primer.fastq.gz"
+    output:
+        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
+        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker1.fastq.gz"
+    resources:
+        mem = "40G",
+        time = "12:00:00",
+        cpus_per_task = 12,
+    shell:
+        """
+        {bbduk_dir} \
+        in1={input.in1} \
+        in2={input.in2} \
+        outm1={output.out1} \
+        outm2={output.out2} \
+        k=30 mm=f rcomp=f restrictleft=108 skipr1=t \
+        hdist=3 \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.linker1.txt \
+        threads={resources.cpus_per_task} \
+        literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
+        """
+    
+rule rna_filter_L2:
+    input:
+        in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
+        in2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker1.fastq.gz"
+    output:
+        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
+        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz"
+    resources:
+        mem = "40G",
+        time = "12:00:00",
+        cpus_per_task = 12,
+    shell:
+        """
+        {bbduk_dir} \
+        in1={input.in1} \
+        in2={input.in2} \
+        outm1={output.out1} \
+        outm2={output.out2} \
+        k=30 mm=f rcomp=f restrictleft=70 skipr1=t \
+        hdist=3 \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.linker2.txt \
+        threads={resources.cpus_per_task} \
+        literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
+        """
+    
+rule rna_fq_process:
+    input:
+        "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz"
+    output:
+        "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq"
+    resources:
+        mem = "20G",
+        time = "4:00:00",
+        cpus_per_task = 1,
+    shell:
+        """
+        # Path to fastq_process.py relative to the directory where snakemake is run
+        python Data_preprocess/Spatial-RNA/fastq_process.py --input {input} --output {output}
+        """
+    
+rule rna_star_solo:
+    input:
+        read_BC = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq",
+        read_Seq = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
+        wl = "fastq/{sample}/spatial_barcodes.txt",
+    output:
+        "pipeline_output/{sample}/rna_processed/align/Aligned.out.sam"
+    resources:
+        mem = "100G",
+        time = "24:00:00",
+        cpus_per_task = 24,
+    shell:
+        """
+        module load STAR || true
+        mkdir -p pipeline_output/{wildcards.sample}/rna_processed/align/
+        STAR --runThreadN {resources.cpus_per_task} \
+        --genomeDir {STAR_REF_DIR} \
+        --readFilesIn {input.read_Seq} {input.read_BC} \
+        --soloType CB_UMI_Simple \
+        --soloCBwhitelist {input.wl} \
+        --soloFeatures GeneFull \
+        --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_processed/align/
+        """
