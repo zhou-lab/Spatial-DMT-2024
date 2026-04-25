@@ -1,119 +1,246 @@
 #!/usr/bin/env python3
-
-import argparse
-import gzip
+import argparse, gzip, os, sys
 from fuzzysearch import find_near_matches
 from Bio import SeqIO
 from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
 
-# Create the argument parser
-parser = argparse.ArgumentParser(description="Process paired-end FASTQ files with adapter filtering. Example usage: python spatialmeth_trimadapters.py reads1.fastq.gz reads2.fastq.gz -o output")
+def open_fastq_file(fp):
+    return gzip.open(fp, "rt") if fp.endswith(".gz") else open(fp, "r")
 
-# Add positional arguments
-parser.add_argument("read1_fastq", help="Path to the read 1 FASTQ file.")
-parser.add_argument("read2_fastq", help="Path to the read 2 FASTQ file.")
+def write_fastq_record(h, rid, seq, qual_ints):
+    h.write("@{}\n".format(rid))
+    h.write(str(seq) + "\n")
+    h.write("+\n")
+    h.write("".join(chr(q + 33) for q in qual_ints) + "\n")
 
-# Add optional flag argument
-parser.add_argument("-o", "--output_prefix", default="out", help="Output file prefix.")
-parser.add_argument("-a", "--adapters", nargs='+', default=["CTATCTCTTATA", "AGATGCGAGAAGCCAACGCTTG"], help="Read 1 adapter sequence to trim.")
-parser.add_argument("-l1", "--linker1", default="GTGGTTGATGTTTTGTATTGGTGTATGATT", help="First linker sequence.")
-parser.add_argument("-l2", "--linker2", default="ATTTATGTGTTTGAGAGGTTAGAGTATTTG", help="Second linker sequence.")
-parser.add_argument("-t", "--trim_end2", default="AGATGTGTATAAGAGATAG", help="Trim read 2 until this subsequence.")
+def load_whitelist(path, col=4):
+    if not path: return None
+    wl = set()
+    with open(path) as f:
+        for line in f:
+            if not line.strip(): continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= col:
+                wl.add(parts[col-1])
+    return wl
 
-# Parse the command-line arguments
+parser = argparse.ArgumentParser(
+    description="Trim adapters/linkers and (optionally) demultiplex in one pass."
+)
+parser.add_argument("read1_fastq")
+parser.add_argument("read2_fastq")
+parser.add_argument("-o","--output_prefix", default="out")
+parser.add_argument("-a","--adapters", nargs='+',
+    default=["CTATCTCTTATA","AGATGCGAGAAGCCAACGCTTG"])
+parser.add_argument("-l1","--linker1", default="GTGGTTGATGTTTTGTATTGGTGTATGATT")
+parser.add_argument("-l2","--linker2", default="ATTTATGTGTTTGAGAGGTTAGAGTATTTG")
+parser.add_argument("-t","--trim_end2", default="AGATGTGTATAAGAGATAG")
+parser.add_argument("--min_len", type=int, default=10, help="min length after trimming")
+parser.add_argument("--whitelist", help="whitelist file (barcode in column --whitelist_col)")
+parser.add_argument("--whitelist_col", type=int, default=4)
+parser.add_argument("--dmux_dir", help="dir to write per-barcode FASTQs for this chunk")
+parser.add_argument("--chunk_id", default="", help="chunk ID suffix")
+parser.add_argument("--barcode_len", type=int, default=16)
+parser.add_argument("--bc-mismatch", type=int, default=0,
+                    help="allowed barcode mismatches (Hamming); 0 or 1 recommended")
+parser.add_argument("--bc-ambig", choices=["drop","first"], default="drop",
+                    help="if multiple 1-mismatch matches: drop or pick first")
+
 args = parser.parse_args()
 
-# Access the arguments
-read1_fastq_path = args.read1_fastq
-read2_fastq_path = args.read2_fastq
+dmux_handles_R1 = {}
+dmux_handles_R2 = {}
 
-# Function to open the FASTQ file, handling gzip compression if necessary
-def open_fastq_file(file_path):
-    if file_path.endswith(".gz"):
-        return gzip.open(file_path, "rt")
-    else:
-        return open(file_path, "r")
-    
-def write_seqrecord_to_fastq(id, seq, qual, f):
-    f.write("@{}\n".format(id))
-    f.write(str(seq) + "\n")
-    f.write("+\n")
-    f.write("".join(chr(q + 33) for q in qual) + "\n")
+OPEN_HANDLE_CAP = 7000
 
-# Create output file handles
-output_read1_handle = gzip.open(args.output_prefix + "_R1.fq.gz", "wt")
-output_read2_handle = gzip.open(args.output_prefix + "_R2.fq.gz", "wt")
+def get_dmux_handles(barcode):
+    if barcode not in dmux_handles_R1:
+        # If you want LRU safety, call _maybe_evict_lru() here
+        r1p = os.path.join(args.dmux_dir, f"{barcode}_R1.{args.chunk_id}.fq")
+        r2p = os.path.join(args.dmux_dir, f"{barcode}_R2.{args.chunk_id}.fq")
+        # Use large buffers to cut syscalls (1 MiB)
+        dmux_handles_R1[barcode] = open(r1p, "a", buffering=1024*1024)
+        dmux_handles_R2[barcode] = open(r2p, "a", buffering=1024*1024)
+    return dmux_handles_R1[barcode], dmux_handles_R2[barcode]
 
-# Read the paired-end FASTQ files simultaneously
-n_reads = 0
-n_reads_passed = 0
-n_reads_trimmed = 0
-n_bases_trimmed = 0
+wl = load_whitelist(args.whitelist, args.whitelist_col) if args.whitelist else None
+do_dmux = wl is not None and args.dmux_dir is not None
+if do_dmux:
+    os.makedirs(args.dmux_dir, exist_ok=True)
 
+r1_out = gzip.open(args.output_prefix + "_R1.fq.gz", "wt")
+r2_out = gzip.open(args.output_prefix + "_R2.fq.gz", "wt")
+lambda_r1_out = gzip.open(args.output_prefix + "_Lambda_R1.fq.gz", "wt")
+lambda_r2_out = gzip.open(args.output_prefix + "_Lambda_R2.fq.gz", "wt")
+
+BARCODE85_MOTIF = "TTATTTTT"
+
+n_reads = n_pass = n_trim = n_trim_bases = n_reads_barcode85 = n_written_barcode85 = 0
+dmux_counts_R1 = {}
+dmux_counts_R2 = {}
 barcode_cnt = {}
-with open_fastq_file(args.read1_fastq) as read1_handle, open_fastq_file(args.read2_fastq) as read2_handle:
-    for read1_record, read2_record in zip(SeqIO.parse(read1_handle, "fastq"), SeqIO.parse(read2_handle, "fastq")):
+
+def assign_barcode_hamming1(bc, wl, ambig_policy="drop"):
+    if bc in wl:
+        return bc
+    hits = []
+    bases = ("A","C","G","T")
+    bc_list = list(bc)
+    for i, orig in enumerate(bc_list):
+        for b in bases:
+            if b == orig: continue
+            cand = bc[:i] + b + bc[i+1:]
+            if cand in wl:
+                hits.append(cand)
+                if ambig_policy == "first":
+                    return cand
+    if not hits:
+        return None
+    if ambig_policy == "first":
+        return sorted(hits)[0]
+    return None
+
+with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq) as r2h:
+    for rec1, rec2 in zip(SeqIO.parse(r1h, "fastq"), SeqIO.parse(r2h, "fastq")):
         n_reads += 1
+        r1seq = rec1.seq
+        r2seq = rec2.seq
+        is_barcode85 = BARCODE85_MOTIF in str(r1seq) or BARCODE85_MOTIF in str(r2seq)
+        if is_barcode85:
+            n_reads_barcode85 += 1
+
+        lambda_seq1 = r1seq
+        lambda_qual1 = rec1.letter_annotations["phred_quality"]
+        hits = []
+        for a in args.adapters:
+            hits.extend(find_near_matches(a, str(r1seq), max_l_dist=1))
+        if hits:
+            trim_i = min(m.start for m in hits)
+            if trim_i < len(lambda_seq1):
+                n_trim += 1
+                n_trim_bases += (len(lambda_seq1) - trim_i)
+                lambda_seq1 = lambda_seq1[:trim_i]
+                lambda_qual1 = lambda_qual1[:trim_i]
+
+        te2 = find_near_matches(args.trim_end2, str(r2seq), max_l_dist=1)
+        if te2:
+            trim2_i = te2[0].end
+            lambda_seq2 = r2seq[trim2_i:]
+            lambda_qual2 = rec2.letter_annotations["phred_quality"][trim2_i:]
+        else:
+            lambda_seq2 = r2seq
+            lambda_qual2 = rec2.letter_annotations["phred_quality"]
+
+        if is_barcode85 and len(lambda_seq1) >= args.min_len and len(lambda_seq2) >= args.min_len:
+            write_fastq_record(lambda_r1_out, rec1.id, lambda_seq1, lambda_qual1)
+            write_fastq_record(lambda_r2_out, rec2.id, lambda_seq2, lambda_qual2)
+            n_written_barcode85 += 1
+
+        lk1 = find_near_matches(args.linker1, str(r2seq), max_l_dist=2)
+        lk2 = find_near_matches(args.linker2, str(r2seq), max_l_dist=2)
+        if not (len(lk1)==1 and len(lk2)==1 and len(te2)==1):
+            continue
+
+        # Barcode from 8bp before each linker (concat = 16bp)
+        l1s = lk1[0].start; l2s = lk2[0].start
+        b1s = max(0, l1s-8); b2s = max(0, l2s-8)
+        barcode = str(r2seq[b1s:l1s] + r2seq[b2s:l2s])
         
-        # Access the sequences of read 1 and read 2
-        read1_seq = read1_record.seq
-        read2_seq = read2_record.seq
-
-        matches_linker1 = find_near_matches(args.linker1, str(read2_seq), max_l_dist=2)
-        matches_linker2 = find_near_matches(args.linker2, str(read2_seq), max_l_dist=2)
-        matches_trim2 = find_near_matches(args.trim_end2, str(read2_seq), max_l_dist=1)
-        # print(len(matches_linker1), len(matches_linker2), len(matches_trim2))
-        # Check if both linker sequences are present in read 2 sequence
-        if len(matches_linker1)==1 and len(matches_linker2)==1 and len(matches_trim2)==1:
-            n_reads_passed += 1
-            linker1_start = matches_linker1[0].start
-            linker2_start = matches_linker2[0].start
-            barcode = str(read2_seq[(linker1_start-8):linker1_start] + read2_seq[(linker2_start-8):linker2_start])
-
-            # Count barcodes
-            if barcode in barcode_cnt:
-                barcode_cnt[barcode] += 1
-            else:
-                barcode_cnt[barcode] = 1
-
-            # process and write read 1
-            new_id = barcode+"_"+read1_record.id
-            new_seq = read1_record.seq
-            new_qual = read1_record.letter_annotations["phred_quality"]
-            adapter_matches = []
-            for adapter in args.adapters:
-                adapter_matches.extend(find_near_matches(adapter, str(read1_seq), max_l_dist=1))
+        if barcode in barcode_cnt:
+            barcode_cnt[barcode] += 1
+        else:
+            barcode_cnt[barcode] = 1
                 
-            if len(adapter_matches) > 0:
-                trim_index = min([x.start for x in adapter_matches])
-                n_reads_trimmed += 1
-                n_bases_trimmed += len(new_seq) - trim_index
-                new_seq = new_seq[:trim_index]
-                new_qual = new_qual[:trim_index]
-            write_seqrecord_to_fastq(new_id, new_seq, new_qual, output_read1_handle)
+        if len(barcode) != args.barcode_len:
+            continue
 
-            # process and write read 2
-            trim_index = matches_trim2[0].end
-            new_id = barcode+"_"+read2_record.id
-            new_seq = read2_record.seq[trim_index:]
-            new_qual = read2_record.letter_annotations["phred_quality"][trim_index:]
-            write_seqrecord_to_fastq(new_id, new_seq, new_qual, output_read2_handle)
+        new_seq1 = lambda_seq1
+        new_qual1 = lambda_qual1
+        new_seq2 = lambda_seq2
+        new_qual2 = lambda_qual2
+
+        if len(new_seq1) < args.min_len or len(new_seq2) < args.min_len:
+            continue
+
+        # Write trimmed chunk-level outputs (keep sample-wide merge compatible)
+        rid1 = f"{barcode}_{rec1.id}"
+        rid2 = f"{barcode}_{rec2.id}"
+        write_fastq_record(r1_out, rid1, new_seq1, new_qual1)
+        write_fastq_record(r2_out, rid2, new_seq2, new_qual2)
+        n_pass += 1
+        
+        assigned = None
+        if do_dmux and wl is not None:
+            if args.bc_mismatch <= 0:
+                if barcode in wl:
+                    assigned = barcode
+            else:
+            # allow 1 mismatch (you can allow >1 but not recommended)
+                if barcode in wl:
+                    assigned = barcode
+                elif args.bc_mismatch >= 1:
+                    assigned = assign_barcode_hamming1(barcode, wl, args.bc_ambig)
+
+        if assigned is not None:
+            h1, h2 = get_dmux_handles(assigned)
+            h1.write(f"@{rid1}\n{str(new_seq1)}\n+\n{''.join(chr(q+33) for q in new_qual1)}\n")
+            h2.write(f"@{rid2}\n{str(new_seq2)}\n+\n{''.join(chr(q+33) for q in new_qual2)}\n")
+            dmux_counts_R1[assigned] = dmux_counts_R1.get(assigned, 0) + 1
+            dmux_counts_R2[assigned] = dmux_counts_R2.get(assigned, 0) + 1
+
+
+
+r1_out.close()
+r2_out.close()
+lambda_r1_out.close()
+lambda_r2_out.close()
+
+for h in dmux_handles_R1.values():
+    try: h.close()
+    except: pass
+for h in dmux_handles_R2.values():
+    try: h.close()
+    except: pass
+
+# Write per-chunk barcode list/counts (for later merging)
+# barcodes file (sorted desc)
+if dmux_counts_R1 or dmux_counts_R2:
+    os.makedirs(os.path.dirname(args.output_prefix), exist_ok=True)
+
+# Barcodes summary across all passed reads (not only whitelisted)
+# Recompute from dmux_counts_R1 if present, else empty
+if dmux_counts_R1:
+    sorted_bc = sorted(dmux_counts_R1.items(), key=lambda x: x[1], reverse=True)
+    with open(args.output_prefix + "_barcodes.txt","w") as fbc:
+        mx = sorted_bc[0][1]
+        for bc, cnt in sorted_bc:
+            fbc.write(f"{bc}\t{cnt}\t{'T' if cnt > mx/100.0 else 'F'}\n")
+else:
+    # still write an empty file to avoid missing targets
+    open(args.output_prefix + "_barcodes.txt","w").close()
+
+with open(args.output_prefix + "_stats.txt","w") as fs:
+    fs.write(f"Reads_total\t{n_reads}\n")
+    fs.write(f"Reads_written_barcode85\t{n_written_barcode85}\n")
+    fs.write(f"Reads_detected\t{n_reads - n_reads_barcode85}\n")
+    fs.write(f"Reads_passed\t{n_pass}\n")
+    fs.write(f"Reads_trimmed\t{n_trim}\n")
+    fs.write(f"Bases_trimmed\t{n_trim_bases}\n")
+
+# Per-chunk dmux counts (mates separate) to be merged later
+if do_dmux:
+    with open(args.output_prefix + f"_R1_dmux.{args.chunk_id}.txt","w") as f1:
+        for bc,c in sorted(dmux_counts_R1.items()):
+            f1.write(f"{bc}\t{c}\n")
+    with open(args.output_prefix + f"_R2_dmux.{args.chunk_id}.txt","w") as f2:
+        for bc,c in sorted(dmux_counts_R2.items()):
+            f2.write(f"{bc}\t{c}\n")
+
 
 sorted_barcodes = sorted(barcode_cnt.items(), key=lambda x: x[1], reverse=True)
-output_bc_handle = open(args.output_prefix + "_barcodes.txt", "w")
+output_bc_handle = open(args.output_prefix + "_barcodes_all.txt", "w")
 cnt_max = sorted_barcodes[0][1]
 for barcode, cnt in sorted_barcodes:
     output_bc_handle.write("{}\t{}\t{}\n".format(barcode, cnt, "T" if cnt > cnt_max/100 else "F"))
 output_bc_handle.close()
 
-output_stats_handle = open(args.output_prefix + "_stats.txt", "w")
-output_stats_handle.write("Reads_detected\t{}\n".format(n_reads))
-output_stats_handle.write("Reads_passed\t{}\n".format(n_reads_passed))
-output_stats_handle.write("Reads_trimmed\t{}\n".format(n_reads_trimmed))
-output_stats_handle.write("Bases_trimmed\t{}\n".format(n_bases_trimmed))
-output_stats_handle.close()
-
-# Close the output file handles
-output_read1_handle.close()
-output_read2_handle.close()
