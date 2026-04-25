@@ -1,24 +1,14 @@
 import os
 import glob
 
-# Support both --profile (where data is in config[ref]) 
-# and --configfile (where data might be in config["config"][ref])
-if config.get("ref") in config:
-    ref = config[config["ref"]]
-elif "config" in config and config.get("ref") in config["config"]:
-    ref = config["config"][config["ref"]]
-elif "ref" in config:
-    # This handles the case where ref is provided via --config ref=... 
-    # but the genome blocks were loaded via configfile
-    target_ref = config["ref"]
-    if target_ref in config:
-        ref = config[target_ref]
-    elif "config" in config and target_ref in config["config"]:
-        ref = config["config"][target_ref]
-    else:
-        raise ValueError(f"Genome reference '{target_ref}' not found in config.")
+configfile: os.path.join(workflow.basedir, "genomes.yaml")
+
+target_ref = config.get("ref", "")
+if target_ref in config:
+    ref = config[target_ref]
+elif target_ref:
+    raise ValueError(f"Genome reference '{target_ref}' not found in genomes.yaml.")
 else:
-    # Default fallback for initialization
     ref = {}
 
 GENOME = config.get("ref", "unknown")
