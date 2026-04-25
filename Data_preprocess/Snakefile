@@ -105,7 +105,7 @@ rule dna_trim_and_demux:
         parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
-            python Data_preprocess/Spatial-Methylation/spatialmeth_trimadapters.py \
+            python {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
                 "$f" "$f2" \
                 -o pipeline_output/{wildcards.sample}/trim/_out_"$cid" \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
@@ -303,8 +303,8 @@ rule rna_fq_process:
         cpus_per_task = 1,
     shell:
         """
-        # Path to fastq_process.py relative to the directory where snakemake is run
-        python Data_preprocess/Spatial-RNA/fastq_process.py --input {input} --output {output}
+        # Path to fastq_process.py relative to the Snakefile
+        python {workflow.basedir}/Spatial-RNA/fastq_process.py --input {input} --output {output}
         """
     
 rule rna_star_solo:

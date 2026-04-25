@@ -1,5 +1,4 @@
 # Snakemake CLI Flags (Behavior)
-snakefile: Data_preprocess/Snakefile
 cluster:
   "mkdir -p logs/{rule} &&
     sbatch
