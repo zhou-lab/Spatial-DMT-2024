@@ -1,8 +1,10 @@
 import os
 import glob
 
+# Load genome reference definitions (hg38/mm10 index paths, CpG BED, etc.)
 configfile: os.path.join(workflow.basedir, "genomes.yaml")
 
+# Resolve the genome-specific ref dict from genomes.yaml using the 'ref' config key
 target_ref = config.get("ref", "")
 if target_ref in config:
     ref = config[target_ref]
@@ -13,18 +15,16 @@ else:
 
 GENOME = config.get("ref", "unknown")
 
-
-# Sample identification
+# Discover samples: explicit IDS list or auto-detect from fastq/*/DNA_1.fq* on disk
 if "IDS" in config:
     SAMPLES = config["IDS"].split(",")
 else:
-    # Assuming the structure: fastq/{sample}/DNA_1.fq[.gz] and fastq/{sample}/RNA_1.fq[.gz]
     DNA_FILES = glob.glob(os.path.join("fastq", "*/DNA_1.fq*"))
     SAMPLES = sorted(list(set([os.path.dirname(f).split(os.sep)[-1] for f in DNA_FILES])))
 
 print(f"Detected samples: {SAMPLES} in fastq/")
 
-# Genome-specific paths
+# Normalize genome name to the top-level subdirectory used in REF_DIR
 if GENOME.startswith("hg38"):
     GENOME_FOR_PATH = "hg38"
 elif GENOME.startswith("mm10"):
@@ -32,27 +32,25 @@ elif GENOME.startswith("mm10"):
 else:
     raise ValueError(f"Unsupported genome: {GENOME}. Must be hg38 or mm10 based.")
 
-# Reference and Software configuration
+# Paths to reference files and tools; override via profile config or --config on CLI
 REF_DIR = config.get("REF_DIR", "/mnt/isilon/zhou_lab/projects/20191221_references/")
 LAMBDA_REF_BASE = os.path.join(REF_DIR, "Lambda/")
 LAMBDA_REF_FASTA = os.path.join(LAMBDA_REF_BASE, "J02459.fa")
 LAMBDA_BISCUIT_INDEX = os.path.join(LAMBDA_REF_BASE, "biscuit/J02459.fa")
-
-# RNA software/paths
-bbduk_dir = config.get("BBDUK", "bbduk.sh") # Default to PATH if not specified
+bbduk_dir = config.get("BBDUK", "bbduk.sh")
 STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
+# PYTHON: full path to python interpreter with biopython/fuzzysearch/matplotlib/pandas installed
+PYTHON = config.get("PYTHON", "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/python")
+# CONDA_ENV: optional prefix command to activate a conda env, e.g. "source activate Bio &&"
+CONDA_ENV = config.get("CONDA_ENV") or ""
 
-# Environment setup (optional)
-CONDA_ENV = config.get("CONDA_ENV", "") # e.g., "source activate_2022 Bio &&"
-
-# Helper function to find fastq files (supporting both .fq and .fq.gz)
+# Resolve input fastq path, supporting .fq/.fastq with or without .gz
 def get_fastq(wildcards, prefix):
     sample_dir = os.path.join("fastq", wildcards.sample)
     for ext in [".fq.gz", ".fq", ".fastq.gz", ".fastq"]:
         path = os.path.join(sample_dir, prefix + ext)
         if os.path.exists(path):
             return path
-    # Fallback for Snakemake reporting
     return os.path.join(sample_dir, prefix + ".fq")
 
 rule all:
@@ -70,7 +68,7 @@ rule dna_trim_and_demux:
     input:
         r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
-        wl = "fastq/{sample}/spatial_barcodes.txt",
+        wl = "barcodes/spatial_barcodes.txt",
     output:
         r1_out = "pipeline_output/{sample}/trim/{sample}_R1.fq.gz",
         r2_out = "pipeline_output/{sample}/trim/{sample}_R2.fq.gz",
@@ -98,7 +96,7 @@ rule dna_trim_and_demux:
         {CONDA_ENV} parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
-            python {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
+            {PYTHON} {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
                 "$f" "$f2" \
                 -o pipeline_output/{wildcards.sample}/trim/_out_"$cid" \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
@@ -111,20 +109,23 @@ rule dna_trim_and_demux:
                 --bc-mismatch 1
         ' ::: pipeline_output/{wildcards.sample}/trim/_chunk_1*
         
+        # Concatenate per-chunk trimmed outputs into final merged fastqs
         :> {output.r1_out}
         :> {output.r2_out}
         :> {output.lambda_r1}
         :> {output.lambda_r2}
-        for f in $(ls pipeline_output/{wildcards.sample}/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
+        for f in $(/bin/ls pipeline_output/{wildcards.sample}/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
             cat "$f" >> {output.r1_out}
             cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
         done
-        for f in $(ls pipeline_output/{wildcards.sample}/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
+        for f in $(/bin/ls pipeline_output/{wildcards.sample}/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
             cat "$f" >> {output.lambda_r1}
             cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
         done
 
-        cut -f1 pipeline_output/{wildcards.sample}/dmux/*_R1_dmux.*.txt | sort -u | while read bc; do
+        # Merge per-chunk per-barcode demux fastqs into one file per barcode
+        /bin/ls pipeline_output/{wildcards.sample}/dmux/*_R1.*.fq 2>/dev/null | \
+            sed 's|.*/||; s|_R1[.][^.]*[.]fq||' | sort -u | while read bc; do
             cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
             cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
         done
@@ -133,6 +134,8 @@ rule dna_trim_and_demux:
         touch {output.dmux_done}
         """
 
+# Align each per-barcode demuxed FASTQ pair to the genome with biscuit (bisulfite-aware),
+# mark duplicates with dupsifter, sort and index BAM; emit a list of processed barcodes.
 rule dna_biscuit_align:
     input:
         dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
@@ -160,6 +163,8 @@ rule dna_biscuit_align:
         done
         """
 
+# CpG methylation pileup: call methylation per barcode BAM, convert VCF to CpG BED,
+# merge strands, intersect with reference CpG BED, and pack into yame .cg format.
 rule dna_biscuit_pileup:
     input:
         align_txt = "pipeline_output/{sample}/dmux/align_list.txt"
@@ -177,7 +182,7 @@ rule dna_biscuit_pileup:
         """
         set -xe
         mkdir -p pipeline_output/{wildcards.sample}/pileup/
-        tmp_pileup=tmp/pileup/{wildcards.sample}/
+        tmp_pileup=pipeline_output/{wildcards.sample}/tmp/pileup/
         mkdir -p $tmp_pileup
         for bam in pipeline_output/{wildcards.sample}/bam/*.bam; do
             barcode=$(basename $bam .bam)
@@ -195,7 +200,7 @@ rule dna_biscuit_pileup:
                 yame pack -f 3 - ;
         }}
         export -f vcf2cg
-        parallel -j {resources.cpus_per_task} 'vcf2cg {{}} > '$tmp_pileup'/{{/%.vcf.gz}}.cg' ::: $tmp_pileup/*.vcf.gz
+        parallel -j {resources.cpus_per_task} 'vcf2cg {{}} > '$tmp_pileup'/$(basename {{}} .vcf.gz).cg' ::: $tmp_pileup/*.vcf.gz
         
         :>{output.cg}
         for cg_file in $tmp_pileup/*.cg; do
@@ -209,6 +214,7 @@ rule dna_biscuit_pileup:
 # RNA Pipeline Rules
 ################################################################################
 
+# Keep only R2 reads that contain the spatial primer sequence (identifies valid library molecules)
 rule rna_filter_primer:
     input:
         in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
@@ -235,6 +241,7 @@ rule rna_filter_primer:
         literal=CAAGCGTTGGCTTCTCGCATCT
         """
 
+# Keep reads containing linker 1 sequence in R2 (marks the BC1/BC2 junction)
 rule rna_filter_L1:
     input:
         in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
@@ -260,6 +267,7 @@ rule rna_filter_L1:
         literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
         """
     
+# Keep reads containing linker 2 sequence in R2 (marks the BC2/UMI junction)
 rule rna_filter_L2:
     input:
         in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
@@ -285,6 +293,7 @@ rule rna_filter_L2:
         literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
         """
     
+# Extract barcode+UMI from fixed positions in R2 and reformat into STARsolo-compatible read
 rule rna_fq_process:
     input:
         "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz"
@@ -297,14 +306,15 @@ rule rna_fq_process:
     shell:
         """
         # Path to fastq_process.py relative to the Snakefile
-        python {workflow.basedir}/Spatial-RNA/fastq_process.py --input {input} --output {output}
+        {PYTHON} {workflow.basedir}/Spatial-RNA/fastq_process.py --input {input} --output {output}
         """
     
+# Align RNA reads and quantify gene expression per spatial barcode using STARsolo
 rule rna_star_solo:
     input:
         read_BC = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq",
         read_Seq = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
-        wl = "fastq/{sample}/spatial_barcodes.txt",
+        wl = "barcodes/RNA_whitelist_singlecol.txt",
     output:
         "pipeline_output/{sample}/rna_processed/align/Aligned.out.sam"
     resources:
@@ -323,3 +333,123 @@ rule rna_star_solo:
         --soloFeatures GeneFull \
         --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_processed/align/
         """
+
+################################################################################
+# QC Rules
+################################################################################
+
+# Aggregate per-barcode read counts from demux FASTQs and dupsifter stats
+rule qc_barcode_counts:
+    input:
+        dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
+        align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
+    output:
+        counts = "qc_output/{sample}/table/{sample}_barcode_counts.tsv",
+    resources:
+        mem = "8G",
+        cpus_per_task = 4,
+    shell:
+        """
+        mkdir -p qc_output/{wildcards.sample}/table/
+        {PYTHON} {workflow.basedir}/qc/count_barcodes.py \
+            --dmux-dir pipeline_output/{wildcards.sample}/dmux/ \
+            --bam-dir  pipeline_output/{wildcards.sample}/bam/ \
+            --sample   {wildcards.sample} \
+            --output-dir qc_output/{wildcards.sample}/table/
+        """
+
+# Map per-barcode counts to 2D spatial coordinates using the barcode whitelist
+rule qc_spatial_match:
+    input:
+        counts    = "qc_output/{sample}/table/{sample}_barcode_counts.tsv",
+        whitelist = "barcodes/spatial_barcodes.txt",
+    output:
+        spatial_counts = "qc_output/{sample}/table/{sample}_spatial_barcode_counts.tsv",
+        bool_index     = "qc_output/{sample}/table/{sample}_barcodes_bool_index.tsv",
+    resources:
+        mem = "4G",
+        cpus_per_task = 1,
+    shell:
+        """
+        {PYTHON} {workflow.basedir}/qc/match_barcodes.py \
+            --barcode-counts {input.counts} \
+            --whitelist      {input.whitelist} \
+            --sample         {wildcards.sample} \
+            --output-dir     qc_output/{wildcards.sample}/table/
+        """
+
+# Generate spatial heatmap PNGs (DNA counts, mapping rate, dup rate)
+rule qc_spatial_plots:
+    input:
+        spatial_counts = "qc_output/{sample}/table/{sample}_spatial_barcode_counts.tsv",
+    output:
+        flag = "qc_output/{sample}/plots/.done",
+    resources:
+        mem = "8G",
+        cpus_per_task = 1,
+    shell:
+        """
+        mkdir -p qc_output/{wildcards.sample}/plots/
+        {PYTHON} {workflow.basedir}/qc/plot_spatial_qc.py \
+            --spatial-counts {input.spatial_counts} \
+            --sample         {wildcards.sample} \
+            --output-dir     qc_output/{wildcards.sample}/plots/
+        touch {output.flag}
+        """
+
+# Run MultiQC over all pipeline outputs for this sample
+rule qc_multiqc:
+    input:
+        star_log    = "pipeline_output/{sample}/rna_processed/align/Log.final.out",
+        plots_flag  = "qc_output/{sample}/plots/.done",
+    output:
+        report = "qc_output/{sample}/multiqc_report.html",
+    resources:
+        mem = "8G",
+        cpus_per_task = 1,
+    shell:
+        """
+        {PYTHON} -m multiqc pipeline_output/{wildcards.sample}/ \
+            --outdir qc_output/{wildcards.sample}/ \
+            --filename multiqc_report.html \
+            --force
+        """
+
+# Generate self-contained HTML report with embedded spatial plots and summary stats
+rule qc_html_report:
+    input:
+        spatial_counts = "qc_output/{sample}/table/{sample}_spatial_barcode_counts.tsv",
+        plots_flag     = "qc_output/{sample}/plots/.done",
+        multiqc        = "qc_output/{sample}/multiqc_report.html",
+    output:
+        report = "qc_output/{sample}/qc_report.html",
+    resources:
+        mem = "4G",
+        cpus_per_task = 1,
+    shell:
+        """
+        {PYTHON} {workflow.basedir}/qc/generate_html_report.py \
+            --spatial-counts {input.spatial_counts} \
+            --plots-dir      qc_output/{wildcards.sample}/plots/ \
+            --sample         {wildcards.sample} \
+            --multiqc-html   {input.multiqc} \
+            --output         {output.report}
+        """
+
+# Top-level QC target: produces both the spatial HTML report and MultiQC for all samples
+rule qc:
+    input:
+        expand("qc_output/{sample}/qc_report.html", sample=SAMPLES),
+
+# Run with: snakemake --profile profiles/local_HPC --snakefile Data_preprocess/Snakefile -- clean
+rule clean:
+    run:
+        import shutil
+        for sample in SAMPLES:
+            for d in [
+                os.path.join("pipeline_output", sample, "tmp"),
+                os.path.join("qc_output", sample, "plots"),
+            ]:
+                if os.path.exists(d):
+                    shutil.rmtree(d)
+                    print(f"Removed {d}")

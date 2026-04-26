@@ -51,59 +51,125 @@ brew install bbtools   # tested: 39.81b
 | [Biopython](https://biopython.org/) | — | conda-forge |
 
 ### 1. Data preprocessing
+
 Next Generation Sequencing (NGS) was performed using an Illumina NovaSeq 6000 sequencer (150bp paired-end mode). Read 1 contains the genome sequences, and Read 2 contains the spatial Barcode A & B and UMIs (mRNA).
- 
-The preprocessing pipeline for both spatial DNA methylation and spatial RNA data was built upon the Snakemake workflow management.
 
-#### - For RNA data: 
-Change all the directories in the Snakefile to obtain RNA count matrices:
+The preprocessing pipeline processes both spatial DNA methylation and spatial RNA data in a single Snakemake workflow (`Data_preprocess/Snakefile`).
 
-    sbatch Snakemake.sh
-    
-#### Descriptions:
+#### Input data structure
 
-(1) Setup of directories and files: Automate the generation of directories to store each sample's raw and processed data. 
+```
+fastq/
+  {sample}/
+    DNA_1.fq.gz   # DNA methylation read 1 (genomic sequence)
+    DNA_2.fq.gz   # DNA methylation read 2 (spatial barcode + adapter)
+    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)
+    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)
+barcodes/
+  spatial_barcodes.txt       # full spatial barcode whitelist (multi-column)
+  RNA_whitelist_singlecol.txt  # single-column barcode list for STARsolo
+```
 
-(2)`filter_primer`: Use bbduk to filter sequences containing primers from the reads.
+Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`.
 
-(3)`filter_L1` & `filter_L2`: Apply additional filters to select reads with specific linker sequences.
+#### Running the pipeline
 
-(4)`fq_process`: Extract spatial barcodes and UMIs and reformats data. 
+**Local / HPC (no scheduler):**
+```bash
+snakemake --profile profiles/local_HPC \
+    --snakefile Data_preprocess/Snakefile \
+    --config ref=hg38
+```
 
-(5)`star_solo`: Align reads to a reference genome (e.g. mm10) using STAR.
+**SLURM cluster:**
+```bash
+snakemake --profile profiles/slurm \
+    --snakefile Data_preprocess/Snakefile \
+    --config ref=hg38
+```
 
-#### - For DNA methylation data: 
+Supported values for `ref`: `hg38`, `mm10` (must match a key in `Data_preprocess/genomes.yaml`).
 
-Change the config ID to the data ID number.
-To obtain BISCUIT QC results: 
+Key profile config options (set in `profiles/local_HPC/config.yaml` or overridden with `--config`):
 
-    runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk biscuit_qc_all
-    
-To obtain CG levels:
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ref` | — | Genome reference key (`hg38` or `mm10`) |
+| `REF_DIR` | `/mnt/isilon/zhou_lab/projects/20191221_references/` | Root directory of reference files |
+| `BBDUK` | `bbduk.sh` | Path to bbduk.sh (defaults to PATH) |
+| `PYTHON` | `python` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
 
-    runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk feature_mean_all`
+#### Pipeline steps
 
-To obtain CH levels:
+**DNA methylation branch:**
 
-    runSnakemake --config ID=SpMETSLE17DM ref=mm10 --snakefile /mnt/isilon/zhoulab/labpipelines/Snakefiles/20230602_SpatialMethSeq.smk feature_mean_allc_all
+1. `dna_trim_and_demux` — Trim adapters and demultiplex reads by spatial barcode using `spatialmeth_trimadapters.py`; outputs per-barcode FASTQ pairs and merged trimmed FASTQs
+2. `dna_biscuit_align` — Bisulfite-aware alignment of each barcode's reads to the genome with BISCUIT, duplicate marking with dupsifter, BAM sort and index
+3. `dna_biscuit_pileup` — CpG methylation pileup per barcode BAM, VCF→BED conversion, strand merging, CpG BED intersection, and packing into a yame `.cg` file indexed by barcode
 
-#### Descriptions:
+**RNA branch (runs in parallel with DNA):**
 
-(1)`trim_all`: Trim the fastq files using spatialmeth_trimadapters.py. 
+4. `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
+5. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
+6. `rna_filter_L2` — bbduk: retain reads containing linker 2 sequence
+7. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
+8. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification
 
-(2)`demultiplex_all`: Split all the reads based on the barcodes, obtain 2500 fastq files.
+#### Outputs
 
-(3)`biscuit_align_all `: Align reads to a reference genome (e.g. mm10) using BISCUIT.
+```
+pipeline_output/{sample}/
+  trim/          # merged trimmed DNA FASTQs (non-lambda and lambda)
+  dmux/          # per-barcode demuxed DNA FASTQ pairs (.fq.gz)
+  bam/           # per-barcode BAMs with index and dupsifter stats
+  pileup/        # {sample}.cg and {sample}.cg.idx (yame packed methylation)
+  rna_processed/
+    tmp/         # intermediate filtered FASTQs
+    qc/          # bbduk filter stats per step
+    align/       # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
+```
 
-(4)`biscuit_pileup_all`: Identify all the CG and call the methylation at those sites.
+### 2. Quality control
 
-(5)`biscuit_qc_all`: Quality check for alignment and methylation calling. 
+Run the QC pipeline after preprocessing completes. It produces a MultiQC report aggregating STAR alignment and bbduk filter statistics, spatial heatmaps of per-barcode metrics (DNA read depth, mapping rate, duplication rate), and a self-contained HTML report embedding all plots.
 
-(6)`feature_mean_all`: Obtain average methylation over selected windows.
+```bash
+snakemake --profile profiles/local_HPC \
+    --snakefile Data_preprocess/Snakefile \
+    --config ref=hg38 \
+    -- qc
+```
 
-(7)`biscuit_pileup_allc_all`: Identify all the CH and call the methylation at those sites.
+#### QC outputs
 
-#### - For Image processing: 
+```
+qc_output/{sample}/
+  table/
+    {sample}_barcode_counts.tsv          # per-barcode DNA reads, mapping rate, dup rate
+    {sample}_spatial_barcode_counts.tsv  # counts mapped to (x, y) spatial grid
+    {sample}_barcodes_bool_index.tsv     # all observed barcodes with spatial flag
+  plots/
+    spatial_dna_reads.png                # read depth heatmap
+    spatial_log_dna_reads.png            # log10 read depth heatmap
+    spatial_mapping_rate.png             # per-barcode mapping rate
+    spatial_dup_rate.png                 # per-barcode duplication rate
+    barcode_rank.png                     # barcode rank vs count
+  multiqc_report.html                    # MultiQC report (STAR + bbduk stats)
+  qc_report.html                         # self-contained HTML with embedded spatial maps
+```
+
+#### Cleaning temporary files
+
+Intermediate VCF and per-barcode `.cg` files from the pileup step are stored under `pipeline_output/{sample}/tmp/`. The spatial plot PNGs are stored under `qc_output/{sample}/plots/` (the HTML report embeds them, so the PNGs can be removed). Run after both preprocessing and QC are complete:
+
+```bash
+snakemake --profile profiles/local_HPC \
+    --snakefile Data_preprocess/Snakefile \
+    --config ref=hg38 \
+    -- clean
+```
+
+#### - For Image processing:
 This python script processes a phase contrast tissue image to generate spatial metadata similar to 10x Visium outputs. It first converts the image to grayscale and applies adaptive thresholding to create a binary mask that distinguishes tissue from background. The image is then divided into a fixed 50×50 grid, and each grid cell is evaluated to determine whether it contains tissue based on a pixel intensity threshold. Detected tissue spots are matched with predefined spatial barcodes, and the results are compiled into output files, including a tissue positions CSV, a scale factors JSON, and a visualization image with highlighted tissue regions.
 
 ### 2. Downstream data analysis and visualization 
