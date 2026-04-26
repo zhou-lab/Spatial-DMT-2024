@@ -1,9 +1,9 @@
-# Snakemake CLI Flags (Behavior)
-cluster:
+executor: cluster-generic
+cluster-generic-submit-cmd:
   "mkdir -p logs/{rule} &&
     sbatch
     --time={resources.time}
-    --mem={resources.mem}
+    --mem={resources.mem_mb}
     --cpus-per-task={resources.cpus_per_task}
     --job-name=smk-{rule}-%j
     --output=logs/{rule}/{rule}-%j.out
@@ -13,12 +13,13 @@ default-resources:
   - mem="10G"
   - cpus_per_task=1
 
-REF_DIR: "/mnt/isilon/zhou_lab/projects/20191221_references/"
-BBDUK: "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
-CONDA_ENV: "source activate_2022 Bio &&"
+config:
+  REF_DIR: "/mnt/isilon/zhou_lab/projects/20191221_references/"
+  BBDUK: "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
+  PYTHON: "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/python"
 
 jobs: 100
 printshellcmds: True
 latency-wait: 100
-reason: True
-rerun-triggers: mtime
+rerun-triggers:
+  - mtime

@@ -32,17 +32,22 @@ elif GENOME.startswith("mm10"):
 else:
     raise ValueError(f"Unsupported genome: {GENOME}. Must be hg38 or mm10 based.")
 
-# Paths to reference files and tools; override via profile config or --config on CLI
-REF_DIR = config.get("REF_DIR", "/mnt/isilon/zhou_lab/projects/20191221_references/")
-LAMBDA_REF_BASE = os.path.join(REF_DIR, "Lambda/")
-LAMBDA_REF_FASTA = os.path.join(LAMBDA_REF_BASE, "J02459.fa")
-LAMBDA_BISCUIT_INDEX = os.path.join(LAMBDA_REF_BASE, "biscuit/J02459.fa")
-bbduk_dir = config.get("BBDUK", "bbduk.sh")
+# Paths to reference files and tools; must be set in profile config.yaml or via --config
+def require_config(key):
+    if key not in config:
+        raise ValueError(
+            f"Required config key '{key}' is missing. "
+            f"Set it in your profile config.yaml or via --config {key}=..."
+        )
+    return config[key]
+
+REF_DIR = require_config("REF_DIR")
+lambda_ref = config["Lambda"]
+LAMBDA_REF_FASTA = os.path.join(REF_DIR, lambda_ref["REF_BASE"], lambda_ref["REF_FASTA"])
+LAMBDA_BISCUIT_INDEX = os.path.join(REF_DIR, lambda_ref["REF_BASE"], lambda_ref["BISCUIT_INDEX"])
+bbduk = require_config("BBDUK")
 STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
-# PYTHON: full path to python interpreter with biopython/fuzzysearch/matplotlib/pandas installed
-PYTHON = config.get("PYTHON", "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/python")
-# CONDA_ENV: optional prefix command to activate a conda env, e.g. "source activate Bio &&"
-CONDA_ENV = config.get("CONDA_ENV") or ""
+PYTHON = require_config("PYTHON")
 
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
 def get_fastq(wildcards, prefix):
@@ -57,6 +62,7 @@ rule all:
     input:
         # DNA outputs
         expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
+        expand("pipeline_output/{sample}/pileup_lambda/{sample}_Lambda_cg.bed", sample=SAMPLES),
         # RNA outputs
         expand("pipeline_output/{sample}/rna_processed/align/Aligned.out.sam", sample=SAMPLES)
 
@@ -78,7 +84,7 @@ rule dna_trim_and_demux:
     resources:
         mem = "140G",
         time = "120:00:00",
-        cpus_per_task = 12,
+        cpus_per_task = 24,
     shell:
         """
         ulimit -n 65535
@@ -93,7 +99,7 @@ rule dna_trim_and_demux:
         $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_1
         $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_2
 
-        {CONDA_ENV} parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
+        parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
             {PYTHON} {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
@@ -129,7 +135,8 @@ rule dna_trim_and_demux:
             cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
             cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
         done
-        parallel -j 12 'gzip -f {{}}' ::: pipeline_output/{wildcards.sample}/dmux/*_R1.fq pipeline_output/{wildcards.sample}/dmux/*_R2.fq
+        parallel -j {resources.cpus_per_task} 'gzip -f {{}}' ::: pipeline_output/{wildcards.sample}/dmux/*_R1.fq pipeline_output/{wildcards.sample}/dmux/*_R2.fq
+        rm -f pipeline_output/{wildcards.sample}/dmux/*_R1.*.fq pipeline_output/{wildcards.sample}/dmux/*_R2.*.fq
         rm -f pipeline_output/{wildcards.sample}/trim/_chunk_* pipeline_output/{wildcards.sample}/trim/_out_*
         touch {output.dmux_done}
         """
@@ -142,7 +149,7 @@ rule dna_biscuit_align:
     output:
         align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
     resources:
-        mem = "150G",
+        mem = "60G",
         time = "96:00:00",
         cpus_per_task = 48,
     params:
@@ -210,6 +217,56 @@ rule dna_biscuit_pileup:
         done
         """
 
+# Align lambda spike-in reads to the lambda genome for bisulfite conversion efficiency.
+rule dna_biscuit_align_lambda:
+    input:
+        r1 = "pipeline_output/{sample}/trim/{sample}_Lambda_R1.fq.gz",
+        r2 = "pipeline_output/{sample}/trim/{sample}_Lambda_R2.fq.gz",
+    output:
+        bam      = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.bam",
+        bai      = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
+        flagstat = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
+        dup      = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.dupsifter.stat",
+    resources:
+        mem = "80G",
+        time = "24:00:00",
+        cpus_per_task = 24,
+    shell:
+        """
+        set -xe
+        mkdir -p pipeline_output/{wildcards.sample}/bam_lambda/
+        biscuit align {LAMBDA_BISCUIT_INDEX} -b 1 -@ {resources.cpus_per_task} {input.r2} {input.r1} | \
+            dupsifter --stats-output {output.dup} {LAMBDA_REF_FASTA} | \
+            samtools sort -T {output.bam}_tmp -O bam -o {output.bam}
+        samtools index {output.bam}
+        samtools flagstat {output.bam} > {output.flagstat}
+        """
+
+# CpG and non-CpG methylation pileup on lambda BAM; allc.bed is used to estimate conversion efficiency.
+rule dna_biscuit_pileup_lambda:
+    input:
+        bam = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.bam",
+        bai = "pipeline_output/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
+    output:
+        vcf  = "pipeline_output/{sample}/pileup_lambda/{sample}_Lambda.vcf.gz",
+        tbi  = "pipeline_output/{sample}/pileup_lambda/{sample}_Lambda.vcf.gz.tbi",
+        allc = "pipeline_output/{sample}/pileup_lambda/{sample}_Lambda_allc.bed",
+        cg   = "pipeline_output/{sample}/pileup_lambda/{sample}_Lambda_cg.bed",
+    resources:
+        mem = "20G",
+        time = "24:00:00",
+        cpus_per_task = 4,
+    shell:
+        """
+        set -xe
+        mkdir -p pipeline_output/{wildcards.sample}/pileup_lambda/
+        biscuit pileup -m 0 -a 0 -c -u -p -@ {resources.cpus_per_task} {LAMBDA_REF_FASTA} {input.bam} | \
+            bgzip -c > {output.vcf}
+        tabix -p vcf {output.vcf}
+        biscuit vcf2bed -t c -c {output.vcf} > {output.allc}
+        biscuit vcf2bed -t cg -c {output.vcf} > {output.cg}
+        """
+
 ################################################################################
 # RNA Pipeline Rules
 ################################################################################
@@ -223,13 +280,13 @@ rule rna_filter_primer:
         out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
         out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_primer.fastq.gz"
     resources:
-        mem = "40G",
+        mem = "20G",
         time = "12:00:00",
         cpus_per_task = 12,
     shell:
         """
         mkdir -p pipeline_output/{wildcards.sample}/rna_processed/tmp/ pipeline_output/{wildcards.sample}/rna_processed/qc/
-        {bbduk_dir} \
+        {bbduk} \
         in1={input.in1} \
         in2={input.in2} \
         outm1={output.out1} \
@@ -250,12 +307,12 @@ rule rna_filter_L1:
         out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
         out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker1.fastq.gz"
     resources:
-        mem = "40G",
+        mem = "20G",
         time = "12:00:00",
         cpus_per_task = 12,
     shell:
         """
-        {bbduk_dir} \
+        {bbduk} \
         in1={input.in1} \
         in2={input.in2} \
         outm1={output.out1} \
@@ -276,12 +333,12 @@ rule rna_filter_L2:
         out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
         out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz"
     resources:
-        mem = "40G",
+        mem = "20G",
         time = "12:00:00",
         cpus_per_task = 12,
     shell:
         """
-        {bbduk_dir} \
+        {bbduk} \
         in1={input.in1} \
         in2={input.in2} \
         outm1={output.out1} \
@@ -300,7 +357,7 @@ rule rna_fq_process:
     output:
         "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq"
     resources:
-        mem = "20G",
+        mem = "8G",
         time = "4:00:00",
         cpus_per_task = 1,
     shell:

@@ -1,3 +1,8 @@
+Lambda:
+  REF_BASE: Lambda/
+  REF_FASTA: J02459.fa
+  BISCUIT_INDEX: biscuit/J02459.fa
+
 mm10:
   REF_BASE: mm10/
   BWA: bwa/mm10.fa

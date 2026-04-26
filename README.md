@@ -22,7 +22,15 @@ conda install -c conda-forge -c bioconda \
     dupsifter=1.3.0 \
     yame=1.9 \
     pigz=2.8 \
-    parallel=20260422
+    parallel=20260422 \
+    multiqc \
+    matplotlib \
+    pandas
+```
+
+**For SLURM execution only**, install the cluster-generic executor plugin into your Snakemake environment (not required for local/HPC runs):
+```bash
+pip install snakemake-executor-plugin-cluster-generic
 ```
 
 **Install BBTools (provides `bbduk.sh`) separately:**
@@ -37,6 +45,7 @@ brew install bbtools   # tested: 39.81b
 | Tool | Version tested | Source |
 |------|---------------|--------|
 | [Snakemake](https://snakemake.readthedocs.io/) | 9.19.0 | conda-forge |
+| [snakemake-executor-plugin-cluster-generic](https://github.com/snakemake/snakemake-executor-plugin-cluster-generic) | 1.0.9 | pip (SLURM only) |
 | [STAR](https://github.com/alexdobin/STAR) / STARsolo | 2.7.11b | bioconda |
 | [BISCUIT](https://huishenlab.github.io/biscuit/) | 1.7.1 | bioconda |
 | [samtools](https://www.htslib.org/) | 1.22.1 | bioconda |
@@ -47,8 +56,11 @@ brew install bbtools   # tested: 39.81b
 | [pigz](https://zlib.net/pigz/) | 2.8 | conda-forge |
 | [GNU parallel](https://www.gnu.org/software/parallel/) | 20260422 | conda-forge |
 | [BBTools](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/) (bbduk) | 39.81b | Homebrew / direct |
+| [MultiQC](https://multiqc.info/) | 1.34 | conda-forge |
 | [Python](https://www.python.org/) | 3.x | conda-forge |
 | [Biopython](https://biopython.org/) | — | conda-forge |
+| matplotlib | — | conda-forge |
+| pandas | — | conda-forge |
 
 ### 1. Data preprocessing
 
