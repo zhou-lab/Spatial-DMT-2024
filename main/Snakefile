@@ -54,7 +54,7 @@ rule all:
     input:
         expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/pileup_lambda/{sample}_Lambda_cg.bed", sample=SAMPLES),
-        expand("pipeline_output/{sample}/rna_processed/align/Aligned.out.sam", sample=SAMPLES),
+        expand("pipeline_output/{sample}/rna_STAR/Aligned.out.sam", sample=SAMPLES),
 
 ################################################################################
 # DNA Pipeline Rules
@@ -290,12 +290,12 @@ rule rna_filter_primer:
     shell:
         """
         mkdir -p pipeline_output/{wildcards.sample}/tmp/rna_processed/ \
-                 pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/
+                 pipeline_output/{wildcards.sample}/rna_bbduk/
         {bbduk} \
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=22 mm=f rcomp=f restrictleft=30 skipr1=t hdist=2 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.primer.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.primer.txt \
         threads={resources.cpus_per_task} \
         literal=CAAGCGTTGGCTTCTCGCATCT
         """
@@ -318,7 +318,7 @@ rule rna_filter_L1:
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=30 mm=f rcomp=f restrictleft=108 skipr1=t hdist=3 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.linker1.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker1.txt \
         threads={resources.cpus_per_task} \
         literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
         """
@@ -341,7 +341,7 @@ rule rna_filter_L2:
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=30 mm=f rcomp=f restrictleft=70 skipr1=t hdist=3 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.linker2.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker2.txt \
         threads={resources.cpus_per_task} \
         literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
         """
@@ -368,7 +368,7 @@ rule rna_star_solo:
         read_Seq = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
         wl       = "barcodes/RNA_whitelist_singlecol.txt",
     output:
-        "pipeline_output/{sample}/rna_processed/align/Aligned.out.sam",
+        "pipeline_output/{sample}/rna_STAR/Aligned.out.sam",
     resources:
         mem = "100G",
         time = "24:00:00",
@@ -376,14 +376,14 @@ rule rna_star_solo:
     shell:
         """
         if command -v module >/dev/null 2>&1; then module load STAR || true; fi
-        mkdir -p pipeline_output/{wildcards.sample}/rna_processed/align/
+        mkdir -p pipeline_output/{wildcards.sample}/rna_STAR/
         STAR --runThreadN {resources.cpus_per_task} \
             --genomeDir {STAR_REF_DIR} \
             --readFilesIn {input.read_Seq} {input.read_BC} \
             --soloType CB_UMI_Simple \
             --soloCBwhitelist {input.wl} \
             --soloFeatures GeneFull \
-            --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_processed/align/
+            --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_STAR/
         """
 
 ################################################################################
@@ -492,7 +492,7 @@ rule qc_spatial_plots:
 # MultiQC: aggregates STAR logs, bbduk stats, and BISCUIT QC tables
 rule qc_multiqc:
     input:
-        star_log   = "pipeline_output/{sample}/rna_processed/align/Log.final.out",
+        star_log   = "pipeline_output/{sample}/rna_STAR/Log.final.out",
         biscuit_qc = "qc_output/{sample}/biscuit_qc/.done",
         plots_flag = "qc_output/{sample}/plots/.done",
     output:
