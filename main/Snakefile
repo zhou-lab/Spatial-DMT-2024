@@ -398,7 +398,7 @@ rule dna_biscuit_qc:
         align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
         cg        = "pipeline_output/{sample}/pileup/{sample}.cg",
     output:
-        flag = "pipeline_output/{sample}/biscuit_qc/.done",
+        flag = "qc_output/{sample}/biscuit_qc/.done",
     resources:
         mem = "30G",
         time = "48:00:00",
@@ -409,11 +409,11 @@ rule dna_biscuit_qc:
     shell:
         """
         set -xe
-        mkdir -p pipeline_output/{wildcards.sample}/biscuit_qc/
+        mkdir -p qc_output/{wildcards.sample}/biscuit_qc/
         tmp_pileup=pipeline_output/{wildcards.sample}/tmp/pileup/
         cat {input.align_txt} | parallel -j {resources.cpus_per_task} '
             barcode={{}}
-            QC.sh -o pipeline_output/{wildcards.sample}/biscuit_qc/ \
+            QC.sh -o qc_output/{wildcards.sample}/biscuit_qc/ \
                 --vcf $tmp_pileup/$barcode.vcf.gz \
                 {params.assets} \
                 {params.ref_fasta} \
@@ -493,7 +493,7 @@ rule qc_spatial_plots:
 rule qc_multiqc:
     input:
         star_log   = "pipeline_output/{sample}/rna_processed/align/Log.final.out",
-        biscuit_qc = "pipeline_output/{sample}/biscuit_qc/.done",
+        biscuit_qc = "qc_output/{sample}/biscuit_qc/.done",
         plots_flag = "qc_output/{sample}/plots/.done",
     output:
         report = "qc_output/{sample}/multiqc_report.html",
@@ -504,6 +504,7 @@ rule qc_multiqc:
         """
         {PYTHON} -m multiqc \
             pipeline_output/{wildcards.sample}/ \
+            qc_output/{wildcards.sample}/ \
             --outdir qc_output/{wildcards.sample}/ \
             --filename multiqc_report.html \
             --force
@@ -536,7 +537,7 @@ rule feature_mean:
         cg   = "pipeline_output/{sample}/pileup/{sample}.cg",
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),
     output:
-        txt = "pipeline_output/{sample}/features/{feat}.txt.gz",
+        txt = "qc_output/{sample}/features/{feat}.txt.gz",
     resources:
         mem = "120G",
         time = "6:00:00",
@@ -544,7 +545,7 @@ rule feature_mean:
     shell:
         """
         set -xe
-        tmp=pipeline_output/{wildcards.sample}/tmp/features_{wildcards.feat}/
+        tmp=qc_output/{wildcards.sample}/tmp/features_{wildcards.feat}/
         rm -rf $tmp && mkdir -p $tmp
         cut -f1 {input.cg}.idx | parallel -j {resources.cpus_per_task} \
             'yame subset {input.cg} {{}} | \
@@ -558,7 +559,7 @@ rule feature_mean:
 rule qc:
     input:
         expand("qc_output/{sample}/qc_report.html", sample=SAMPLES),
-        expand("pipeline_output/{sample}/features/{feat}.txt.gz", sample=SAMPLES, feat=FEATS),
+        expand("qc_output/{sample}/features/{feat}.txt.gz", sample=SAMPLES, feat=FEATS),
 
 ################################################################################
 # Clean
@@ -572,6 +573,7 @@ rule clean:
             for d in [
                 os.path.join("pipeline_output", sample, "tmp"),
                 os.path.join("qc_output", sample, "plots"),
+                os.path.join("qc_output", sample, "tmp"),
             ]:
                 if os.path.exists(d):
                     shutil.rmtree(d)
@@ -631,7 +633,7 @@ rule feature_mean_allc:
         allc = "pipeline_output/{sample}/pileup/{sample}.allc",
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),
     output:
-        txt = "pipeline_output/{sample}/features_allc/{feat}.txt.gz",
+        txt = "qc_output/{sample}/features_allc/{feat}.txt.gz",
     resources:
         mem = "150G",
         time = "72:00:00",
@@ -639,7 +641,7 @@ rule feature_mean_allc:
     shell:
         """
         set -xe
-        tmp=pipeline_output/{wildcards.sample}/tmp/features_allc_{wildcards.feat}/
+        tmp=qc_output/{wildcards.sample}/tmp/features_allc_{wildcards.feat}/
         rm -rf $tmp && mkdir -p $tmp
         tmp_pileup=pipeline_output/{wildcards.sample}/tmp/pileup/
 
@@ -665,4 +667,4 @@ rule feature_mean_allc:
 rule allc:
     input:
         expand("pipeline_output/{sample}/pileup/{sample}.allc", sample=SAMPLES),
-        expand("pipeline_output/{sample}/features_allc/{feat}.txt.gz", sample=SAMPLES, feat=FEATS_CH),
+        expand("qc_output/{sample}/features_allc/{feat}.txt.gz", sample=SAMPLES, feat=FEATS_CH),
