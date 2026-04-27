@@ -9,7 +9,7 @@ This repository contains the data preprocessing and QC pipeline, plus downstream
 
 ![](https://github.com/dyxmvp/Spatial-DMT-2024/blob/main/workflow/Analysis_pipeline.jpg)
 
-## Data analysis instructions
+## Pipeline instructions
 ### Dependencies
 
 All dependencies can be installed via [conda](https://docs.conda.io/en/latest/) (bioconda/conda-forge channels) except BBTools, which is available via [Homebrew](https://brew.sh/) on macOS or direct download on Linux.
