@@ -1,8 +1,12 @@
 # Spatial joint profiling of DNA methylome and transcriptome (Spatial-DMT)
-## Introduction
-This repository is for raw data processing and downstream data analysis & visualization code in the **"Spatial joint profiling of DNA methylome and transcriptome in mammalian tissues"**  manuscript.
 
-### Computational workflow for spatial-DMT data processing and analysis
+This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`Data_preprocess/Snakefile`) processes raw sequencing data through four targets:
+
+- **`all`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in alignment, and RNA alignment with STARsolo
+- **`qc`** — BISCUIT QC tables, spatial heatmaps, MultiQC report, self-contained HTML report, and per-feature mean methylation summaries
+- **`allc`** — all-cytosine pileup and non-CpG feature methylation summaries (run before `clean`)
+- **`clean`** — remove intermediate VCF/cg files and spatial plot PNGs
+
 ![](https://github.com/dyxmvp/Spatial-DMT-2024/blob/main/workflow/Analysis_pipeline.jpg)
 
 ## Data analysis instructions
