@@ -92,7 +92,7 @@ rule dna_trim_and_demux:
         parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
-            {PYTHON} {workflow.basedir}/Spatial-Methylation/spatialmeth_trimadapters.py \
+            {PYTHON} {workflow.basedir}/../tools/spatialmeth_trimadapters.py \
                 "$f" "$f2" \
                 -o pipeline_output/{wildcards.sample}/trim/_out_"$cid" \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
@@ -358,7 +358,7 @@ rule rna_fq_process:
         cpus_per_task = 1,
     shell:
         """
-        {PYTHON} {workflow.basedir}/Spatial-RNA/fastq_process.py --input {input} --output {output}
+        {PYTHON} {workflow.basedir}/../tools/fastq_process.py --input {input} --output {output}
         """
 
 # Align RNA reads and quantify gene expression per spatial barcode using STARsolo
@@ -443,7 +443,7 @@ rule qc_barcode_counts:
     shell:
         """
         mkdir -p qc_output/{wildcards.sample}/table/
-        {PYTHON} {workflow.basedir}/qc/count_barcodes.py \
+        {PYTHON} {workflow.basedir}/../tools/count_barcodes.py \
             --dmux-dir   pipeline_output/{wildcards.sample}/dmux/ \
             --bam-dir    pipeline_output/{wildcards.sample}/bam/ \
             --sample     {wildcards.sample} \
@@ -463,7 +463,7 @@ rule qc_spatial_match:
         cpus_per_task = 1,
     shell:
         """
-        {PYTHON} {workflow.basedir}/qc/match_barcodes.py \
+        {PYTHON} {workflow.basedir}/../tools/match_barcodes.py \
             --barcode-counts {input.counts} \
             --whitelist      {input.whitelist} \
             --sample         {wildcards.sample} \
@@ -482,7 +482,7 @@ rule qc_spatial_plots:
     shell:
         """
         mkdir -p qc_output/{wildcards.sample}/plots/
-        {PYTHON} {workflow.basedir}/qc/plot_spatial_qc.py \
+        {PYTHON} {workflow.basedir}/../tools/plot_spatial_qc.py \
             --spatial-counts {input.spatial_counts} \
             --sample         {wildcards.sample} \
             --output-dir     qc_output/{wildcards.sample}/plots/
@@ -522,7 +522,7 @@ rule qc_html_report:
         cpus_per_task = 1,
     shell:
         """
-        {PYTHON} {workflow.basedir}/qc/generate_html_report.py \
+        {PYTHON} {workflow.basedir}/../tools/generate_html_report.py \
             --spatial-counts {input.spatial_counts} \
             --plots-dir      qc_output/{wildcards.sample}/plots/ \
             --sample         {wildcards.sample} \

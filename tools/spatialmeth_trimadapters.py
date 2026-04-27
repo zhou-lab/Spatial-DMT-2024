@@ -187,6 +187,12 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
             h2.write(f"@{rid2}\n{str(new_seq2)}\n+\n{''.join(chr(q+33) for q in new_qual2)}\n")
             dmux_counts_R1[assigned] = dmux_counts_R1.get(assigned, 0) + 1
             dmux_counts_R2[assigned] = dmux_counts_R2.get(assigned, 0) + 1
+        elif do_dmux:
+            h1, h2 = get_dmux_handles("UNMATCHED")
+            h1.write(f"@{rid1}\n{str(new_seq1)}\n+\n{''.join(chr(q+33) for q in new_qual1)}\n")
+            h2.write(f"@{rid2}\n{str(new_seq2)}\n+\n{''.join(chr(q+33) for q in new_qual2)}\n")
+            dmux_counts_R1["UNMATCHED"] = dmux_counts_R1.get("UNMATCHED", 0) + 1
+            dmux_counts_R2["UNMATCHED"] = dmux_counts_R2.get("UNMATCHED", 0) + 1
 
 
 

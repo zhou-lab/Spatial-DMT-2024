@@ -1,6 +1,6 @@
 # Spatial joint profiling of DNA methylome and transcriptome (Spatial-DMT)
 
-This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`Data_preprocess/Snakefile`) processes raw sequencing data through four targets:
+This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`main/Snakefile`) processes raw sequencing data through four targets:
 
 - **`all`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in alignment, and RNA alignment with STARsolo
 - **`qc`** — BISCUIT QC tables, spatial heatmaps, MultiQC report, self-contained HTML report, and per-feature mean methylation summaries
@@ -70,7 +70,7 @@ brew install bbtools   # tested: 39.81b
 
 Next Generation Sequencing (NGS) was performed using an Illumina NovaSeq 6000 sequencer (150bp paired-end mode). Read 1 contains the genome sequences, and Read 2 contains the spatial Barcode A & B and UMIs (mRNA).
 
-The preprocessing pipeline processes both spatial DNA methylation and spatial RNA data in a single Snakemake workflow (`Data_preprocess/Snakefile`).
+The preprocessing pipeline processes both spatial DNA methylation and spatial RNA data in a single Snakemake workflow (`main/Snakefile`).
 
 #### Input data structure
 
@@ -92,18 +92,18 @@ Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with
 **Local / HPC (no scheduler):**
 ```bash
 snakemake --profile profiles/local_HPC \
-    --snakefile Data_preprocess/Snakefile \
+    --snakefile main/Snakefile \
     --config ref=hg38
 ```
 
 **SLURM cluster:**
 ```bash
 snakemake --profile profiles/slurm \
-    --snakefile Data_preprocess/Snakefile \
+    --snakefile main/Snakefile \
     --config ref=hg38
 ```
 
-Supported values for `ref`: `hg38`, `mm10` (must match a key in `Data_preprocess/genomes.yaml`).
+Supported values for `ref`: `hg38`, `mm10` (must match a key defined in your `profiles/*/site.yaml`).
 
 Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profiles/slurm/config.yaml`):
 
@@ -154,7 +154,7 @@ Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC
 
 ```bash
 snakemake --profile profiles/local_HPC \
-    --snakefile Data_preprocess/Snakefile \
+    --snakefile main/Snakefile \
     --config ref=hg38 \
     -- qc
 ```
@@ -196,7 +196,7 @@ Optional. Run after preprocessing and **before** clean (requires tmp/ pileup VCF
 
 ```bash
 snakemake --profile profiles/local_HPC \
-    --snakefile Data_preprocess/Snakefile \
+    --snakefile main/Snakefile \
     --config ref=hg38 \
     -- allc
 ```
@@ -215,7 +215,7 @@ Removes `pipeline_output/{sample}/tmp/` (pileup VCFs, per-barcode `.cg` files, i
 
 ```bash
 snakemake --profile profiles/local_HPC \
-    --snakefile Data_preprocess/Snakefile \
+    --snakefile main/Snakefile \
     --config ref=hg38 \
     -- clean
 ```
