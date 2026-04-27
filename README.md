@@ -74,6 +74,8 @@ The preprocessing pipeline processes both spatial DNA methylation and spatial RN
 
 #### Input data structure
 
+The `barcodes/` directory is provided with this repository. Users only need to supply the raw FASTQ files:
+
 ```
 fastq/
   {sample}/
@@ -81,9 +83,6 @@ fastq/
     DNA_2.fq.gz   # DNA methylation read 2 (spatial barcode + adapter)
     RNA_1.fq.gz   # RNA read 1 (cDNA sequence)
     RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)
-barcodes/
-  spatial_barcodes.txt       # full spatial barcode whitelist (multi-column)
-  RNA_whitelist_singlecol.txt  # single-column barcode list for STARsolo
 ```
 
 Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`.
