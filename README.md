@@ -102,48 +102,52 @@ snakemake --profile profiles/slurm \
 
 Supported values for `ref`: `hg38`, `mm10` (must match a key in `Data_preprocess/genomes.yaml`).
 
-Key profile config options (set in `profiles/local_HPC/config.yaml` or overridden with `--config`):
+Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profiles/slurm/config.yaml`):
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `ref` | — | Genome reference key (`hg38` or `mm10`) |
-| `REF_DIR` | `/mnt/isilon/zhou_lab/projects/20191221_references/` | Root directory of reference files |
-| `BBDUK` | `bbduk.sh` | Path to bbduk.sh (defaults to PATH) |
-| `PYTHON` | `python` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
+| Key | Description |
+|-----|-------------|
+| `ref` | Genome reference key (`hg38` or `mm10`) |
+| `REF_DIR` | Root directory of reference files |
+| `BBDUK` | Path to `bbduk.sh` executable |
+| `PYTHON` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
 
 #### Pipeline steps
 
 **DNA methylation branch:**
 
-1. `dna_trim_and_demux` — Trim adapters and demultiplex reads by spatial barcode using `spatialmeth_trimadapters.py`; outputs per-barcode FASTQ pairs and merged trimmed FASTQs
+1. `dna_trim_and_demux` — Trim adapters and demultiplex reads by spatial barcode; outputs per-barcode FASTQ pairs, merged trimmed FASTQs, and lambda spike-in FASTQs
 2. `dna_biscuit_align` — Bisulfite-aware alignment of each barcode's reads to the genome with BISCUIT, duplicate marking with dupsifter, BAM sort and index
 3. `dna_biscuit_pileup` — CpG methylation pileup per barcode BAM, VCF→BED conversion, strand merging, CpG BED intersection, and packing into a yame `.cg` file indexed by barcode
+4. `dna_biscuit_align_lambda` — Align lambda spike-in reads to the lambda genome for bisulfite conversion efficiency estimation
+5. `dna_biscuit_pileup_lambda` — Pileup on lambda BAM; produces allc.bed for conversion efficiency calculation
 
 **RNA branch (runs in parallel with DNA):**
 
-4. `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
-5. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
-6. `rna_filter_L2` — bbduk: retain reads containing linker 2 sequence
-7. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
-8. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification
+6. `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
+7. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
+8. `rna_filter_L2` — bbduk: retain reads containing linker 2 sequence
+9. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
+10. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification
 
 #### Outputs
 
 ```
 pipeline_output/{sample}/
-  trim/          # merged trimmed DNA FASTQs (non-lambda and lambda)
-  dmux/          # per-barcode demuxed DNA FASTQ pairs (.fq.gz)
-  bam/           # per-barcode BAMs with index and dupsifter stats
-  pileup/        # {sample}.cg and {sample}.cg.idx (yame packed methylation)
+  trim/              # merged trimmed DNA FASTQs (non-lambda and lambda)
+  dmux/              # per-barcode demuxed DNA FASTQ pairs (.fq.gz)
+  bam/               # per-barcode BAMs with index and dupsifter stats
+  bam_lambda/        # lambda BAM with flagstat and dupsifter stats
+  pileup/            # {sample}.cg and {sample}.cg.idx (yame packed CpG methylation)
+  pileup_lambda/     # lambda VCF, allc.bed, and cg.bed
   rna_processed/
-    tmp/         # intermediate filtered FASTQs
-    qc/          # bbduk filter stats per step
-    align/       # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
+    tmp/             # intermediate filtered FASTQs
+    qc/              # bbduk filter stats per step
+    align/           # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
 ```
 
 ### 2. Quality control
 
-Run the QC pipeline after preprocessing completes. It produces a MultiQC report aggregating STAR alignment and bbduk filter statistics, spatial heatmaps of per-barcode metrics (DNA read depth, mapping rate, duplication rate), and a self-contained HTML report embedding all plots.
+Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC report aggregating BISCUIT, STAR, and bbduk statistics, spatial heatmaps of per-barcode metrics, a self-contained HTML report, and per-feature mean methylation summaries.
 
 ```bash
 snakemake --profile profiles/local_HPC \
@@ -152,9 +156,22 @@ snakemake --profile profiles/local_HPC \
     -- qc
 ```
 
+**QC steps:**
+
+- `dna_biscuit_qc` — Run `QC.sh` (BISCUIT QC pipeline) on every per-barcode BAM; tables aggregated by MultiQC
+- `qc_barcode_counts` — Per-barcode DNA read counts, mapping rate, and duplication rate
+- `qc_spatial_match` — Map barcode counts to (x, y) spatial grid coordinates
+- `qc_spatial_plots` — Spatial heatmaps of read depth, mapping rate, and duplication rate
+- `qc_multiqc` — MultiQC report aggregating BISCUIT QC tables, STAR logs, and bbduk stats
+- `qc_html_report` — Self-contained HTML report with embedded spatial plots
+- `feature_mean` — Per-barcode mean methylation summarized over genomic features (ChromHMM, windows, chromosomes)
+
 #### QC outputs
 
 ```
+pipeline_output/{sample}/
+  biscuit_qc/        # per-barcode BISCUIT QC tables (input to MultiQC)
+  features/          # per-feature mean methylation tables (.txt.gz per feature set)
 qc_output/{sample}/
   table/
     {sample}_barcode_counts.tsv          # per-barcode DNA reads, mapping rate, dup rate
@@ -166,13 +183,32 @@ qc_output/{sample}/
     spatial_mapping_rate.png             # per-barcode mapping rate
     spatial_dup_rate.png                 # per-barcode duplication rate
     barcode_rank.png                     # barcode rank vs count
-  multiqc_report.html                    # MultiQC report (STAR + bbduk stats)
+  multiqc_report.html                    # MultiQC report (BISCUIT + STAR + bbduk)
   qc_report.html                         # self-contained HTML with embedded spatial maps
 ```
 
-#### Cleaning temporary files
+### 3. AllC (non-CpG methylation)
 
-Intermediate VCF and per-barcode `.cg` files from the pileup step are stored under `pipeline_output/{sample}/tmp/`. The spatial plot PNGs are stored under `qc_output/{sample}/plots/` (the HTML report embeds them, so the PNGs can be removed). Run after both preprocessing and QC are complete:
+Optional. Run after preprocessing and **before** clean (requires tmp/ pileup VCFs). Produces all-cytosine pileup and per-feature non-CpG methylation summaries.
+
+```bash
+snakemake --profile profiles/local_HPC \
+    --snakefile Data_preprocess/Snakefile \
+    --config ref=hg38 \
+    -- allc
+```
+
+#### AllC outputs
+
+```
+pipeline_output/{sample}/
+  pileup/{sample}.allc        # yame-packed all-cytosine methylation indexed by barcode
+  features_allc/              # per-feature non-CpG mean methylation tables (.txt.gz)
+```
+
+### 4. Cleaning temporary files
+
+Removes intermediate VCF and per-barcode `.cg` files from `pipeline_output/{sample}/tmp/` and spatial plot PNGs from `qc_output/{sample}/plots/`. Run after QC (and allc if needed) are complete:
 
 ```bash
 snakemake --profile profiles/local_HPC \
