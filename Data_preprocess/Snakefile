@@ -290,12 +290,12 @@ rule rna_filter_primer:
     shell:
         """
         mkdir -p pipeline_output/{wildcards.sample}/tmp/rna_processed/ \
-                 pipeline_output/{wildcards.sample}/rna_processed/qc/
+                 pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/
         {bbduk} \
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=22 mm=f rcomp=f restrictleft=30 skipr1=t hdist=2 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.primer.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.primer.txt \
         threads={resources.cpus_per_task} \
         literal=CAAGCGTTGGCTTCTCGCATCT
         """
@@ -318,7 +318,7 @@ rule rna_filter_L1:
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=30 mm=f rcomp=f restrictleft=108 skipr1=t hdist=3 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.linker1.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.linker1.txt \
         threads={resources.cpus_per_task} \
         literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
         """
@@ -341,7 +341,7 @@ rule rna_filter_L2:
         in1={input.in1} in2={input.in2} \
         outm1={output.out1} outm2={output.out2} \
         k=30 mm=f rcomp=f restrictleft=70 skipr1=t hdist=3 \
-        stats=pipeline_output/{wildcards.sample}/rna_processed/qc/{wildcards.sample}_stats.linker2.txt \
+        stats=pipeline_output/{wildcards.sample}/rna_processed/bbduk_stats/{wildcards.sample}_stats.linker2.txt \
         threads={resources.cpus_per_task} \
         literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
         """

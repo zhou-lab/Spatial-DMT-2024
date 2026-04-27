@@ -144,7 +144,7 @@ pipeline_output/{sample}/
   pileup_lambda/     # lambda VCF, allc.bed, and cg.bed
   tmp/               # all intermediates removed by clean: pileup VCFs, per-barcode .cg files, filtered FASTQs
   rna_processed/
-    qc/              # bbduk filter stats per step
+    bbduk_stats/     # bbduk filter stats per step
     align/           # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
 ```
 
