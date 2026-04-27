@@ -1,10 +1,7 @@
 import os
 import glob
 
-# Load genome reference definitions (hg38/mm10 index paths, CpG BED, etc.)
-configfile: os.path.join(workflow.basedir, "genomes.yaml")
-
-# Resolve the genome-specific ref dict from genomes.yaml using the 'ref' config key
+# Resolve the genome-specific ref dict from site.yaml using the 'ref' config key
 target_ref = config.get("ref", "")
 if target_ref in config:
     ref = config[target_ref]
