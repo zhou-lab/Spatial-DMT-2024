@@ -142,8 +142,8 @@ pipeline_output/{sample}/
   bam_lambda/        # lambda BAM with flagstat and dupsifter stats
   pileup/            # {sample}.cg and {sample}.cg.idx (yame packed CpG methylation)
   pileup_lambda/     # lambda VCF, allc.bed, and cg.bed
+  tmp/               # all intermediates removed by clean: pileup VCFs, per-barcode .cg files, filtered FASTQs
   rna_processed/
-    tmp/             # intermediate filtered FASTQs
     qc/              # bbduk filter stats per step
     align/           # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
 ```
@@ -211,7 +211,7 @@ pipeline_output/{sample}/
 
 ### 4. Cleaning temporary files
 
-Removes intermediate VCF and per-barcode `.cg` files from `pipeline_output/{sample}/tmp/` and spatial plot PNGs from `qc_output/{sample}/plots/`. Run after QC (and allc if needed) are complete:
+Removes `pipeline_output/{sample}/tmp/` (pileup VCFs, per-barcode `.cg` files, intermediate filtered FASTQs) and spatial plot PNGs from `qc_output/{sample}/plots/`. Run after QC (and allc if needed) are complete:
 
 ```bash
 snakemake --profile profiles/local_HPC \

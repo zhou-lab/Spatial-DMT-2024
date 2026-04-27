@@ -281,15 +281,15 @@ rule rna_filter_primer:
         in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
         in2 = lambda wildcards: get_fastq(wildcards, "RNA_2"),
     output:
-        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
-        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_primer.fastq.gz",
+        out1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
+        out2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
     resources:
         mem = "20G",
         time = "12:00:00",
         cpus_per_task = 12,
     shell:
         """
-        mkdir -p pipeline_output/{wildcards.sample}/rna_processed/tmp/ \
+        mkdir -p pipeline_output/{wildcards.sample}/tmp/rna_processed/ \
                  pipeline_output/{wildcards.sample}/rna_processed/qc/
         {bbduk} \
         in1={input.in1} in2={input.in2} \
@@ -303,11 +303,11 @@ rule rna_filter_primer:
 # Keep reads containing linker 1 sequence in R2 (marks the BC1/BC2 junction)
 rule rna_filter_L1:
     input:
-        in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_primer.fastq.gz",
-        in2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_primer.fastq.gz",
+        in1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
+        in2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
     output:
-        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
-        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker1.fastq.gz",
+        out1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
+        out2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
     resources:
         mem = "20G",
         time = "12:00:00",
@@ -326,11 +326,11 @@ rule rna_filter_L1:
 # Keep reads containing linker 2 sequence in R2 (marks the BC2/UMI junction)
 rule rna_filter_L2:
     input:
-        in1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker1.fastq.gz",
-        in2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker1.fastq.gz",
+        in1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
+        in2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
     output:
-        out1 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
-        out2 = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz",
+        out1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
+        out2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
     resources:
         mem = "20G",
         time = "12:00:00",
@@ -349,9 +349,9 @@ rule rna_filter_L2:
 # Extract barcode+UMI from fixed positions in R2 and reformat into STARsolo-compatible read
 rule rna_fq_process:
     input:
-        "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_filtered_linker2.fastq.gz",
+        "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
     output:
-        "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq",
+        "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
     resources:
         mem = "8G",
         time = "4:00:00",
@@ -364,8 +364,8 @@ rule rna_fq_process:
 # Align RNA reads and quantify gene expression per spatial barcode using STARsolo
 rule rna_star_solo:
     input:
-        read_BC  = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R2_processed.fastq",
-        read_Seq = "pipeline_output/{sample}/rna_processed/tmp/{sample}_R1_filtered_linker2.fastq",
+        read_BC  = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
+        read_Seq = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
         wl       = "barcodes/RNA_whitelist_singlecol.txt",
     output:
         "pipeline_output/{sample}/rna_processed/align/Aligned.out.sam",
