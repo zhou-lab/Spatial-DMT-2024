@@ -10,6 +10,7 @@ PYTHON: "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/python"
 Lambda:
   REF_BASE: Lambda/
   REF_FASTA: J02459.fa
+  CPG_BED: annotation/cpg/cpg.bed.gz
   BISCUIT_INDEX: biscuit/J02459.fa
 
 mm10:

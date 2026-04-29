@@ -171,7 +171,7 @@ snakemake --profile profiles/local_HPC \
 #### QC outputs
 
 ```
-qc_output/{sample}/
+pipeline_output/{sample}/qc/
   biscuit_qc/        # per-barcode BISCUIT QC tables (input to MultiQC)
   features/          # per-feature mean methylation tables (.txt.gz per feature set)
   table/
@@ -204,13 +204,13 @@ snakemake --profile profiles/local_HPC \
 ```
 pipeline_output/{sample}/
   pileup/{sample}.allc        # yame-packed all-cytosine methylation indexed by barcode
-qc_output/{sample}/
+pipeline_output/{sample}/qc/
   features_allc/              # per-feature non-CpG mean methylation tables (.txt.gz)
 ```
 
 ### 4. Cleaning temporary files
 
-Removes `pipeline_output/{sample}/tmp/` and `qc_output/{sample}/tmp/` (pileup VCFs, per-barcode `.cg` files, intermediate filtered FASTQs, per-feature intermediate tables) and spatial plot PNGs from `qc_output/{sample}/plots/`. Run after QC (and allc if needed) are complete:
+Removes `pipeline_output/{sample}/tmp/` and `pipeline_output/{sample}/qc/tmp/` (pileup VCFs, per-barcode `.cg` files, intermediate filtered FASTQs, per-feature intermediate tables) and spatial plot PNGs from `pipeline_output/{sample}/qc/plots/`. Run after QC (and allc if needed) are complete:
 
 ```bash
 snakemake --profile profiles/local_HPC \
