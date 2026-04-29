@@ -215,13 +215,13 @@ def merge_qc_files(input_dir, output_dir, sample, barcodes, spatial_barcodes):
         counts_list = _load(barcodes, suffix, parse_covdist_table)
         if counts_list:
             merged = _merge_sum(counts_list)
-            write_covdist_table(os.path.join(output_dir, f"{sample}_merged_{suffix}"), header, merged)
+            write_covdist_table(os.path.join(output_dir, f"{sample}_{suffix}"), header, merged)
             print(f"  covdist {suffix}: merged {len(counts_list)} barcodes")
 
     # MapQ
     mapq_list = _load(barcodes, 'mapq_table.txt', parse_mapq_table)
     if mapq_list:
-        write_mapq_table(os.path.join(output_dir, f"{sample}_merged_mapq_table.txt"), _merge_sum(mapq_list))
+        write_mapq_table(os.path.join(output_dir, f"{sample}_mapq_table.txt"), _merge_sum(mapq_list))
         print(f"  mapq: merged {len(mapq_list)} barcodes")
 
     # CpG / CpH retention
@@ -231,20 +231,20 @@ def merge_qc_files(input_dir, output_dir, sample, barcodes, spatial_barcodes):
     ]:
         lst = _load(barcodes, suffix, parse_retention_table)
         if lst:
-            write_retention_table(os.path.join(output_dir, f"{sample}_merged_{suffix}"),
+            write_retention_table(os.path.join(output_dir, f"{sample}_{suffix}"),
                                   header, _merge_sum(lst))
             print(f"  {tag} retention: merged {len(lst)} barcodes")
 
     # Dup report
     dup_list = _load(barcodes, 'dup_report.txt', parse_dup_report)
     if dup_list:
-        write_dup_report(os.path.join(output_dir, f"{sample}_merged_dup_report.txt"), _merge_sum(dup_list))
+        write_dup_report(os.path.join(output_dir, f"{sample}_dup_report.txt"), _merge_sum(dup_list))
         print(f"  dup report: merged {len(dup_list)} barcodes")
 
     # Strand table
     strand_list = _load(barcodes, 'strand_table.txt', parse_strand_table)
     if strand_list:
-        write_strand_table(os.path.join(output_dir, f"{sample}_merged_strand_table.txt"),
+        write_strand_table(os.path.join(output_dir, f"{sample}_strand_table.txt"),
                            _merge_sum(strand_list))
         print(f"  strand table: merged {len(strand_list)} barcodes")
 

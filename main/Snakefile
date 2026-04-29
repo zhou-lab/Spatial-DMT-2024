@@ -510,20 +510,22 @@ rule qc_report:
         spatial_counts = "pipeline_output/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = "pipeline_output/{sample}/qc/plots/.done",
     output:
-        multiqc = "pipeline_output/{sample}/qc/multiqc_report.html",
-        report  = "pipeline_output/{sample}/qc/qc_report.html",
+        multiqc = "pipeline_output/{sample}/qc/html/multiqc_report.html",
+        report  = "pipeline_output/{sample}/qc/html/qc_report.html",
     resources:
         mem = "8G",
         cpus_per_task = 1,
     shell:
         """
+        mkdir -p pipeline_output/{wildcards.sample}/qc/html/
         {PYTHON} -m multiqc \
             pipeline_output/{wildcards.sample}/rna_STAR/ \
             pipeline_output/{wildcards.sample}/rna_bbduk/ \
             pipeline_output/{wildcards.sample}/qc/biscuit_qc_merged/ \
-            --outdir pipeline_output/{wildcards.sample}/qc/ \
+            --outdir pipeline_output/{wildcards.sample}/qc/html/ \
             --filename multiqc_report.html \
-            --force
+            --force \
+            --cl-config "sample_names_replace: {{rna_STAR: {wildcards.sample}}}"
         {PYTHON} {workflow.basedir}/../tools/generate_html_report.py \
             --spatial-counts {input.spatial_counts} \
             --plots-dir      pipeline_output/{wildcards.sample}/qc/plots/ \
@@ -560,7 +562,7 @@ rule feature_mean:
 # QC target: spatial HTML report + MultiQC + feature-level methylation summaries
 rule qc:
     input:
-        expand("pipeline_output/{sample}/qc/qc_report.html", sample=SAMPLES),
+        expand("pipeline_output/{sample}/qc/html/qc_report.html", sample=SAMPLES),
         expand("pipeline_output/{sample}/qc/features/{feat}.txt.gz", sample=SAMPLES, feat=FEATS),
 
 ################################################################################
