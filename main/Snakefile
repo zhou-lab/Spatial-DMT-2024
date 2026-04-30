@@ -60,6 +60,7 @@ rule all:
         expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/pileup/{sample}_Lambda.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/rna_STAR/Aligned.out.sam", sample=RNA_SAMPLES),
+        expand("pipeline_output/{sample}/qc/html/qc_report.html", sample=SAMPLES),
 
 ################################################################################
 # DNA Pipeline Rules
@@ -529,21 +530,27 @@ rule qc_report:
         cg             = "pipeline_output/{sample}/pileup/{sample}.cg",
         plots_done     = "pipeline_output/{sample}/qc/plots/.done",
     output:
-        multiqc = "pipeline_output/{sample}/qc/html/multiqc_report.html",
-        report  = "pipeline_output/{sample}/qc/html/qc_report.html",
+        multiqc      = "pipeline_output/{sample}/qc/html/multiqc_report.html",
+        report       = "pipeline_output/{sample}/qc/html/qc_report.html",
+        stats_mqc    = "pipeline_output/{sample}/qc/table/{sample}_stats_mqc.tsv",
+        chromhmm_sum = "pipeline_output/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
     resources:
-        mem = "8G",
-        cpus_per_task = 1,
+        mem = "12G",
+        cpus_per_task = 4,
     shell:
         """
         mkdir -p pipeline_output/{wildcards.sample}/qc/html/
+        
+        # Explicitly aggregate methylation levels for TssA and Tx
+        yame rowop -o musum {input.cg} | \
+            yame summary -m {CHROMHMM_CM} - > {output.chromhmm_sum}
+
         {PYTHON} {workflow.basedir}/../tools/write_stats_mqc.py \
-            --trim-stats     {input.trim_stats} \
-            --spatial-counts {input.spatial_counts} \
-            --cg             {input.cg} \
-            --chromhmm-cm    {CHROMHMM_CM} \
-            --sample         {wildcards.sample} \
-            --output-dir     pipeline_output/{wildcards.sample}/qc/table/
+            --trim-stats       {input.trim_stats} \
+            --spatial-counts   {input.spatial_counts} \
+            --chromhmm-summary {output.chromhmm_sum} \
+            --sample           {wildcards.sample} \
+            --output-dir       pipeline_output/{wildcards.sample}/qc/table/
         RNA_DIRS=""
         if [[ -n "{input.star_log}" ]]; then
             RNA_DIRS="pipeline_output/{wildcards.sample}/rna_STAR/ pipeline_output/{wildcards.sample}/rna_bbduk/"

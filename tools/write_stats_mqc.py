@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
 Generate a MultiQC generalstats TSV from trim stats, spatial barcode counts,
-and bulk ChromHMM methylation levels (TssA, Tx) derived from a yame .cg file.
+and bulk ChromHMM methylation levels (TssA, Tx) derived from a yame summary file.
 
 Reads:
-  - {sample}_trim_stats.txt  (key-value: Reads_total, Reads_passed, ...)
+  - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, ...)
   - {sample}_spatial_barcode_counts.tsv (per-barcode: barcode, x, y, dna_reads, ...)
-  - {sample}.cg              (yame-packed CpG methylation, aggregated via yame rowop)
+  - {sample}_chromhmm_summary.tsv (yame summary output)
 
 Writes:
   - {output_dir}/{sample}_stats_mqc.tsv  (MultiQC generalstats)
 """
 import argparse
 import os
-import subprocess
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--trim-stats',     required=True)
-    p.add_argument('--spatial-counts', required=True)
-    p.add_argument('--cg',             required=True)
-    p.add_argument('--chromhmm-cm',    required=True)
-    p.add_argument('--sample',         required=True)
-    p.add_argument('--output-dir',     required=True)
+    p.add_argument('--trim-stats',       required=True)
+    p.add_argument('--spatial-counts',   required=True)
+    p.add_argument('--chromhmm-summary', required=True)
+    p.add_argument('--sample',           required=True)
+    p.add_argument('--output-dir',       required=True)
     args = p.parse_args()
 
     stats = {}
@@ -50,26 +48,20 @@ def main():
     n_total   = stats.get('Reads_total')
     n_linkers = stats.get('Reads_passed')
 
-    # Run yame rowop + yame summary to get bulk ChromHMM methylation levels
+    # Read bulk ChromHMM methylation levels from summary file
     chromhmm = {}
-    try:
-        cmd = (
-            f"yame rowop -o musum {args.cg} | "
-            f"yame summary -m {args.chromhmm_cm} -"
-        )
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
-        for line in result.stdout.splitlines():
-            parts = line.strip().split('\t')
-            if len(parts) >= 10 and parts[0] != 'QFile':
-                state = parts[3]   # Mask column (state name)
-                beta  = parts[9]   # Beta column (methylation level)
-                if state in ('TssA', 'Tx'):
-                    try:
-                        chromhmm[state] = float(beta)
-                    except ValueError:
-                        pass
-    except subprocess.CalledProcessError:
-        pass
+    if os.path.exists(args.chromhmm_summary):
+        with open(args.chromhmm_summary) as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) >= 10 and parts[0] != 'QFile':
+                    state = parts[3]   # Mask column (state name)
+                    beta  = parts[9]   # Beta column (methylation level)
+                    if state in ('TssA', 'Tx'):
+                        try:
+                            chromhmm[state] = float(beta)
+                        except ValueError:
+                            pass
 
     def pct(num, denom):
         if num is None or not denom:
