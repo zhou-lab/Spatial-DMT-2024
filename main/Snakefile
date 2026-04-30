@@ -43,6 +43,7 @@ def require_config(key):
 
 REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
+RSCRIPT      = require_config("RSCRIPT")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
@@ -54,13 +55,21 @@ def get_fastq(wildcards, prefix):
             return path
     return os.path.join(sample_dir, prefix + ".fq")
 
-# Preprocessing: DNA methylation (CpG + lambda) + RNA expression
-rule all:
+# Main entry point: run preprocessing, QC, and collect deliverables in final_output/
+rule final_output:
     input:
         expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/pileup/{sample}_Lambda.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/rna_STAR/Aligned.out.sam", sample=RNA_SAMPLES),
+        expand("pipeline_output/{sample}/rna_STAR/gene_matrix.rds", sample=RNA_SAMPLES),
         expand("pipeline_output/{sample}/qc/html/qc_report.html", sample=SAMPLES),
+        expand("final_output/{sample}/{sample}.cg", sample=SAMPLES),
+        expand("final_output/{sample}/{sample}.cg.idx", sample=SAMPLES),
+        expand("final_output/{sample}/{sample}_Lambda.cg", sample=SAMPLES),
+        expand("final_output/{sample}/qc_report.html", sample=SAMPLES),
+        expand("final_output/{sample}/multiqc_report.html", sample=SAMPLES),
+        expand("final_output/{sample}/multiqc_report_data", sample=SAMPLES),
+        expand("final_output/{sample}/gene_matrix.rds", sample=RNA_SAMPLES),
 
 ################################################################################
 # DNA Pipeline Rules
@@ -399,7 +408,9 @@ rule rna_star_solo:
         read_Seq = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
         wl       = os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt"),
     output:
-        "pipeline_output/{sample}/rna_STAR/Aligned.out.sam",
+        sam = "pipeline_output/{sample}/rna_STAR/Aligned.out.sam",
+        log = "pipeline_output/{sample}/rna_STAR/Log.final.out",
+        rds = "pipeline_output/{sample}/rna_STAR/gene_matrix.rds",
     resources:
         mem = "100G",
         time = "24:00:00",
@@ -415,6 +426,16 @@ rule rna_star_solo:
             --soloCBwhitelist {input.wl} \
             --soloFeatures GeneFull \
             --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_STAR/
+
+        # Generate Seurat-compatible RDS gene count matrix
+        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/barcodes.tsv
+        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/features.tsv
+        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/matrix.mtx
+        {RSCRIPT} -e '
+            library(Seurat);
+            data <- Read10X("pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/");
+            saveRDS(data, "{output.rds}");
+        '
         """
 
 ################################################################################
@@ -531,6 +552,7 @@ rule qc_report:
         plots_done     = "pipeline_output/{sample}/qc/plots/.done",
     output:
         multiqc      = "pipeline_output/{sample}/qc/html/multiqc_report.html",
+        multiqc_data = directory("pipeline_output/{sample}/qc/html/multiqc_report_data"),
         report       = "pipeline_output/{sample}/qc/html/qc_report.html",
         stats_mqc    = "pipeline_output/{sample}/qc/table/{sample}_stats_mqc.tsv",
         chromhmm_sum = "pipeline_output/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
@@ -601,6 +623,48 @@ rule qc:
     input:
         expand("pipeline_output/{sample}/qc/html/qc_report.html", sample=SAMPLES),
         expand("pipeline_output/{sample}/qc/features/{feat}.txt.gz", sample=SAMPLES, feat=FEATS),
+
+################################################################################
+# Final Output
+################################################################################
+
+rule copy_final_sample_outputs:
+    input:
+        cg      = "pipeline_output/{sample}/pileup/{sample}.cg",
+        cg_idx  = "pipeline_output/{sample}/pileup/{sample}.cg.idx",
+        lambda_cg = "pipeline_output/{sample}/pileup/{sample}_Lambda.cg",
+        qc      = "pipeline_output/{sample}/qc/html/qc_report.html",
+        multiqc = "pipeline_output/{sample}/qc/html/multiqc_report.html",
+        multiqc_data = "pipeline_output/{sample}/qc/html/multiqc_report_data",
+    output:
+        cg      = "final_output/{sample}/{sample}.cg",
+        cg_idx  = "final_output/{sample}/{sample}.cg.idx",
+        lambda_cg = "final_output/{sample}/{sample}_Lambda.cg",
+        qc      = "final_output/{sample}/qc_report.html",
+        multiqc = "final_output/{sample}/multiqc_report.html",
+        multiqc_data = directory("final_output/{sample}/multiqc_report_data"),
+    shell:
+        """
+        mkdir -p final_output/{wildcards.sample}
+        cp {input.cg} {output.cg}
+        cp {input.cg_idx} {output.cg_idx}
+        cp {input.lambda_cg} {output.lambda_cg}
+        cp {input.qc} {output.qc}
+        cp {input.multiqc} {output.multiqc}
+        rm -rf {output.multiqc_data}
+        cp -r {input.multiqc_data} {output.multiqc_data}
+        """
+
+rule copy_final_gene_matrix:
+    input:
+        "pipeline_output/{sample}/rna_STAR/gene_matrix.rds",
+    output:
+        "final_output/{sample}/gene_matrix.rds",
+    shell:
+        """
+        mkdir -p final_output/{wildcards.sample}
+        cp {input} {output}
+        """
 
 ################################################################################
 # Clean

@@ -1,8 +1,8 @@
 # Spatial joint profiling of DNA methylome and transcriptome (Spatial-DMT)
 
-This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`main/Snakefile`) processes raw sequencing data through four targets:
+This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`main/Snakefile`) processes raw sequencing data through these main targets:
 
-- **`all`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in alignment, and RNA alignment with STARsolo
+- **`final_output`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in processing, RNA alignment and gene matrix generation, QC reports, and collection of final deliverables under `final_output/`
 - **`qc`** — BISCUIT QC tables, spatial heatmaps, MultiQC report, self-contained HTML report, and per-feature mean methylation summaries
 - **`allc`** — all-cytosine pileup and non-CpG feature methylation summaries (run before `clean`)
 - **`clean`** — remove intermediate VCF/cg files and spatial plot PNGs
@@ -91,16 +91,28 @@ Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with
 
 **Local / HPC (no scheduler):**
 ```bash
-snakemake --profile profiles/local_HPC \
-    --snakefile main/Snakefile \
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/local_HPC" \
+    --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38
 ```
 
 **SLURM cluster:**
 ```bash
-snakemake --profile profiles/slurm \
-    --snakefile main/Snakefile \
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/slurm" \
+    --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38
+```
+
+The default target is `final_output`. To run it explicitly, append the target after `--`:
+
+```bash
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/slurm" \
+    --snakefile "$REPO/main/Snakefile" \
+    --config ref=hg38 \
+    -- final_output
 ```
 
 Supported values for `ref`: `hg38`, `mm10` (must match a key defined in your `profiles/*/site.yaml`).
@@ -113,6 +125,7 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 | `REF_DIR` | Root directory of reference files |
 | `BBDUK` | Path to `bbduk.sh` executable |
 | `PYTHON` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
+| `RSCRIPT` | Rscript executable with Seurat available for writing `gene_matrix.rds` |
 
 #### Pipeline steps
 
@@ -147,13 +160,27 @@ pipeline_output/{sample}/
   rna_STAR/          # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
 ```
 
+The `final_output` target copies the primary deliverables into one sample-organized directory:
+
+```
+final_output/{sample}/
+  {sample}.cg              # genomic CpG methylation matrix
+  {sample}.cg.idx          # yame index for {sample}.cg
+  {sample}_Lambda.cg       # lambda spike-in CpG methylation matrix
+  qc_report.html           # self-contained QC report
+  multiqc_report.html      # MultiQC report
+  multiqc_report_data/     # MultiQC parsed data and assets
+  gene_matrix.rds          # RNA gene expression matrix, RNA samples only
+```
+
 ### 2. Quality control
 
 Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC report aggregating BISCUIT and (if available) STAR and bbduk statistics, spatial heatmaps of per-barcode metrics, and a self-contained HTML report.
 
 ```bash
-snakemake --profile profiles/local_HPC \
-    --snakefile main/Snakefile \
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/local_HPC" \
+    --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- qc
 ```
@@ -193,8 +220,9 @@ pipeline_output/{sample}/qc/
 Optional. Run after preprocessing and **before** clean (requires tmp/ pileup VCFs). Produces all-cytosine pileup and per-feature non-CpG methylation summaries.
 
 ```bash
-snakemake --profile profiles/local_HPC \
-    --snakefile main/Snakefile \
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/local_HPC" \
+    --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- allc
 ```
@@ -213,8 +241,9 @@ pipeline_output/{sample}/qc/
 Removes `pipeline_output/{sample}/tmp/` and `pipeline_output/{sample}/qc/tmp/` (pileup VCFs, per-barcode `.cg` files, intermediate filtered FASTQs, per-feature intermediate tables) and spatial plot PNGs from `pipeline_output/{sample}/qc/plots/`. Run after QC (and allc if needed) are complete:
 
 ```bash
-snakemake --profile profiles/local_HPC \
-    --snakefile main/Snakefile \
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/local_HPC" \
+    --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- clean
 ```
@@ -233,5 +262,3 @@ The data analysis and visualization were performed using R(4.4.0).
 `Integration_E11E13.Rmd`: Contains all the code to integrate between day 11 and day 13 mouse embryos’ data.
  
 `Utility_function.R`: Contains all functions used including mapping VMR to overlapping genes and iterative PCA. 
-
-
