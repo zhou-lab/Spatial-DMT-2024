@@ -70,7 +70,7 @@ brew install bbtools   # tested: 39.81b
 
 Next Generation Sequencing (NGS) was performed using an Illumina NovaSeq 6000 sequencer (150bp paired-end mode). Read 1 contains the genome sequences, and Read 2 contains the spatial Barcode A & B and UMIs (mRNA).
 
-The preprocessing pipeline processes both spatial DNA methylation and spatial RNA data in a single Snakemake workflow (`main/Snakefile`).
+The preprocessing pipeline processes spatial DNA methylation and (optionally) spatial RNA data in a single Snakemake workflow (`main/Snakefile`).
 
 #### Input data structure
 
@@ -81,11 +81,11 @@ fastq/
   {sample}/
     DNA_1.fq.gz   # DNA methylation read 1 (genomic sequence)
     DNA_2.fq.gz   # DNA methylation read 2 (spatial barcode + adapter)
-    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)
-    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)
+    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)  [optional]
+    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)  [optional]
 ```
 
-Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`.
+Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`. RNA processing is automatically skipped for samples where `RNA_1.fq*` is absent; the QC report will contain DNA-only metrics for those samples.
 
 #### Running the pipeline
 
@@ -124,7 +124,7 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 4. `dna_biscuit_align_lambda` — Align lambda spike-in reads to the lambda genome for bisulfite conversion efficiency estimation
 5. `dna_biscuit_pileup_lambda` — Pileup on lambda BAM; produces allc.bed for conversion efficiency calculation
 
-**RNA branch (runs in parallel with DNA):**
+**RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
 
 6. `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
 7. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
@@ -149,7 +149,7 @@ pipeline_output/{sample}/
 
 ### 2. Quality control
 
-Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC report aggregating BISCUIT, STAR, and bbduk statistics, spatial heatmaps of per-barcode metrics, a self-contained HTML report, and per-feature mean methylation summaries.
+Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC report aggregating BISCUIT and (if available) STAR and bbduk statistics, spatial heatmaps of per-barcode metrics, and a self-contained HTML report.
 
 ```bash
 snakemake --profile profiles/local_HPC \
