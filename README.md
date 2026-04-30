@@ -28,6 +28,8 @@ conda install -c conda-forge -c bioconda \
     pigz=2.8 \
     parallel=20260422 \
     multiqc \
+    r-base \
+    r-seurat \
     matplotlib \
     pandas
 ```
@@ -61,6 +63,8 @@ brew install bbtools   # tested: 39.81b
 | [GNU parallel](https://www.gnu.org/software/parallel/) | 20260422 | conda-forge |
 | [BBTools](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/) (bbduk) | 39.81b | Homebrew / direct |
 | [MultiQC](https://multiqc.info/) | 1.34 | conda-forge |
+| [R](https://www.r-project.org/) | 4.x | conda-forge |
+| [Seurat](https://satijalab.org/seurat/) | 5.x | conda-forge |
 | [Python](https://www.python.org/) | 3.x | conda-forge |
 | [Biopython](https://biopython.org/) | — | conda-forge |
 | matplotlib | — | conda-forge |
