@@ -78,6 +78,7 @@ rule dna_trim_and_demux:
         unmatched_r1 = "pipeline_output/{sample}/dmux/UNMATCHED_R1.fq.gz",
         unmatched_r2 = "pipeline_output/{sample}/dmux/UNMATCHED_R2.fq.gz",
         dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
+        stats     = "pipeline_output/{sample}/trim/{sample}_trim_stats.txt",
     resources:
         mem = "140G",
         time = "120:00:00",
@@ -86,31 +87,34 @@ rule dna_trim_and_demux:
         """
         ulimit -n 65535
         set -xeo pipefail
-        mkdir -p pipeline_output/{wildcards.sample}/trim/ pipeline_output/{wildcards.sample}/dmux/
+        mkdir -p pipeline_output/{wildcards.sample}/trim/ \
+                 pipeline_output/{wildcards.sample}/dmux/ \
+                 pipeline_output/{wildcards.sample}/tmp/trim/ \
+                 pipeline_output/{wildcards.sample}/tmp/dmux/
 
         CAT_CMD1="cat"
         if [[ {input.r1} == *.gz ]]; then CAT_CMD1="pigz -dc"; fi
         CAT_CMD2="cat"
         if [[ {input.r2} == *.gz ]]; then CAT_CMD2="pigz -dc"; fi
 
-        $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_1
-        $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/trim/_chunk_2
+        $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/tmp/trim/_chunk_1
+        $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - pipeline_output/{wildcards.sample}/tmp/trim/_chunk_2
 
         parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
             {PYTHON} {workflow.basedir}/../tools/spatialmeth_trimadapters.py \
                 "$f" "$f2" \
-                -o pipeline_output/{wildcards.sample}/trim/_out_"$cid" \
+                -o pipeline_output/{wildcards.sample}/tmp/trim/_out_"$cid" \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
                     AATCATACACCAATACAAAACATCAACCAC \
                     CAAATACTCTAACCTCTCAAACACATAAAT \
                 --whitelist {input.wl} \
                 --whitelist_col 4 \
-                --dmux_dir pipeline_output/{wildcards.sample}/dmux \
+                --dmux_dir pipeline_output/{wildcards.sample}/tmp/dmux \
                 --chunk_id "$cid" \
                 --bc-mismatch 1
-        ' ::: pipeline_output/{wildcards.sample}/trim/_chunk_1*
+        ' ::: pipeline_output/{wildcards.sample}/tmp/trim/_chunk_1*
 
         # Concatenate per-chunk trimmed outputs into final merged fastqs
         :> {output.r1_out}
@@ -118,24 +122,29 @@ rule dna_trim_and_demux:
         :> {output.lambda_r1}
         :> {output.lambda_r2}
 
-        for f in $(/bin/ls pipeline_output/{wildcards.sample}/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
+        for f in $(/bin/ls pipeline_output/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
             cat "$f" >> {output.r1_out}
             cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
         done
-        for f in $(/bin/ls pipeline_output/{wildcards.sample}/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
+        for f in $(/bin/ls pipeline_output/{wildcards.sample}/tmp/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
             cat "$f" >> {output.lambda_r1}
             cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
         done
 
         # Merge per-chunk per-barcode demux fastqs into one file per barcode (including UNMATCHED)
-        /bin/ls pipeline_output/{wildcards.sample}/dmux/*_R1.*.fq 2>/dev/null | \
+        /bin/ls pipeline_output/{wildcards.sample}/tmp/dmux/*_R1.*.fq 2>/dev/null | \
             sed 's|.*/||; s|_R1[.][^.]*[.]fq||' | sort -u | while read bc; do
-            cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
-            cat pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
+            cat pipeline_output/{wildcards.sample}/tmp/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
+            cat pipeline_output/{wildcards.sample}/tmp/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
         done
         parallel -j {resources.cpus_per_task} 'gzip -f {{}}' ::: pipeline_output/{wildcards.sample}/dmux/*.fq
-        rm -f pipeline_output/{wildcards.sample}/dmux/*_R1.*.fq pipeline_output/{wildcards.sample}/dmux/*_R2.*.fq
-        rm -f pipeline_output/{wildcards.sample}/trim/_chunk_* pipeline_output/{wildcards.sample}/trim/_out_*
+
+        # Merge per-chunk stats by summing each field
+        awk '{{cnt[$1]+=$2}} END {{
+            for (k in cnt) print k"\t"cnt[k]
+        }}' pipeline_output/{wildcards.sample}/tmp/trim/_out_*_stats.txt \
+            | sort -k1,1 > {output.stats}
+
         touch {output.dmux_done}
         """
 
