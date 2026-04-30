@@ -27,6 +27,7 @@ mm10:
   CPA_BED: annotation/allc/ca.bed.gz
   CAC_BED: annotation/allc/cac.bed3.gz
   BISCUIT_QCASSET: biscuit/QC/
+  CHROMHMM_CM: KYCGKB_mm10/ChromHMM.20220414.cm
 
 hg38:
   REF_BASE: hg38/
@@ -38,3 +39,4 @@ hg38:
   CPA_BED: annotation/allc/ca.bed.gz
   CAC_BED: annotation/allc/cac.bed3.gz
   BISCUIT_QCASSET: biscuit/QC/
+  CHROMHMM_CM: KYCGKB_hg38/ChromHMM.20220303.cm

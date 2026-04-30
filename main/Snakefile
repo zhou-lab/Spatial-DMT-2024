@@ -488,6 +488,7 @@ rule qc_biscuit_aggregate:
 
 FEATURE_DIR    = os.path.join(REF_DIR, GENOME_FOR_PATH, "features")
 FEATURE_CM_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, f"KYCGKB_{GENOME_FOR_PATH}")
+CHROMHMM_CM    = os.path.join(REF_DIR, ref["REF_BASE"], ref["CHROMHMM_CM"])
 if GENOME_FOR_PATH == "hg38":
     FEATS = ["ChromHMM.20220303", "Win100k.20220228", "Chromosome.20221129"]
 else:
@@ -524,6 +525,8 @@ rule qc_report:
                          if wc.sample in RNA_SAMPLES else [],
         biscuit_merged = "pipeline_output/{sample}/qc/biscuit_qc_merged/.done",
         spatial_counts = "pipeline_output/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
+        trim_stats     = "pipeline_output/{sample}/trim/{sample}_trim_stats.txt",
+        cg             = "pipeline_output/{sample}/pileup/{sample}.cg",
         plots_done     = "pipeline_output/{sample}/qc/plots/.done",
     output:
         multiqc = "pipeline_output/{sample}/qc/html/multiqc_report.html",
@@ -534,6 +537,13 @@ rule qc_report:
     shell:
         """
         mkdir -p pipeline_output/{wildcards.sample}/qc/html/
+        {PYTHON} {workflow.basedir}/../tools/write_stats_mqc.py \
+            --trim-stats     {input.trim_stats} \
+            --spatial-counts {input.spatial_counts} \
+            --cg             {input.cg} \
+            --chromhmm-cm    {CHROMHMM_CM} \
+            --sample         {wildcards.sample} \
+            --output-dir     pipeline_output/{wildcards.sample}/qc/table/
         RNA_DIRS=""
         if [[ -n "{input.star_log}" ]]; then
             RNA_DIRS="pipeline_output/{wildcards.sample}/rna_STAR/ pipeline_output/{wildcards.sample}/rna_bbduk/"
@@ -541,6 +551,7 @@ rule qc_report:
         {PYTHON} -m multiqc \
             $RNA_DIRS \
             pipeline_output/{wildcards.sample}/qc/biscuit_qc_merged/ \
+            pipeline_output/{wildcards.sample}/qc/table/ \
             --outdir pipeline_output/{wildcards.sample}/qc/html/ \
             --filename multiqc_report.html \
             --force \
