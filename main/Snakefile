@@ -43,7 +43,6 @@ def require_config(key):
 
 REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
-RSCRIPT      = require_config("RSCRIPT")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
@@ -61,7 +60,6 @@ rule final_output:
         expand("pipeline_output/{sample}/pileup/{sample}.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/pileup/{sample}_Lambda.cg", sample=SAMPLES),
         expand("pipeline_output/{sample}/rna_STAR/Aligned.out.sam", sample=RNA_SAMPLES),
-        expand("pipeline_output/{sample}/rna_STAR/gene_matrix.rds", sample=RNA_SAMPLES),
         expand("pipeline_output/{sample}/qc/html/qc_report.html", sample=SAMPLES),
         expand("final_output/{sample}/{sample}.cg", sample=SAMPLES),
         expand("final_output/{sample}/{sample}.cg.idx", sample=SAMPLES),
@@ -69,7 +67,7 @@ rule final_output:
         expand("final_output/{sample}/qc_report.html", sample=SAMPLES),
         expand("final_output/{sample}/multiqc_report.html", sample=SAMPLES),
         expand("final_output/{sample}/multiqc_report_data", sample=SAMPLES),
-        expand("final_output/{sample}/gene_matrix.rds", sample=RNA_SAMPLES),
+        expand("final_output/{sample}/Solo.out", sample=RNA_SAMPLES),
 
 ################################################################################
 # DNA Pipeline Rules
@@ -142,12 +140,14 @@ rule dna_trim_and_demux:
         done
 
         # Merge per-chunk per-barcode demux fastqs into one file per barcode (including UNMATCHED)
-        /bin/ls pipeline_output/{wildcards.sample}/tmp/dmux/*_R1.*.fq 2>/dev/null | \
-            sed 's|.*/||; s|_R1[.][^.]*[.]fq||' | sort -u | while read bc; do
+        # Use find instead of ls glob to avoid "Argument list too long" with 60k+ chunk files
+        find pipeline_output/{wildcards.sample}/tmp/dmux -maxdepth 1 -name '*_R1.*.fq' -printf '%f\n' 2>/dev/null | \
+            sed 's|_R1[.][^.]*[.]fq||' | sort -u | while read bc; do
             cat pipeline_output/{wildcards.sample}/tmp/dmux/"${{bc}}"_R1.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
             cat pipeline_output/{wildcards.sample}/tmp/dmux/"${{bc}}"_R2.*.fq > pipeline_output/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
         done
-        parallel -j {resources.cpus_per_task} 'gzip -f {{}}' ::: pipeline_output/{wildcards.sample}/dmux/*.fq
+        find pipeline_output/{wildcards.sample}/dmux -maxdepth 1 -name '*.fq' | \
+            parallel -j {resources.cpus_per_task} 'gzip -f {{}}'
 
         # Merge per-chunk stats by summing each field
         awk '{{cnt[$1]+=$2}} END {{
@@ -410,7 +410,6 @@ rule rna_star_solo:
     output:
         sam = "pipeline_output/{sample}/rna_STAR/Aligned.out.sam",
         log = "pipeline_output/{sample}/rna_STAR/Log.final.out",
-        rds = "pipeline_output/{sample}/rna_STAR/gene_matrix.rds",
     resources:
         mem = "100G",
         time = "24:00:00",
@@ -427,15 +426,6 @@ rule rna_star_solo:
             --soloFeatures GeneFull \
             --outFileNamePrefix pipeline_output/{wildcards.sample}/rna_STAR/
 
-        # Generate Seurat-compatible RDS gene count matrix
-        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/barcodes.tsv
-        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/features.tsv
-        gzip -f pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/matrix.mtx
-        {RSCRIPT} -e '
-            library(Seurat);
-            data <- Read10X("pipeline_output/{wildcards.sample}/rna_STAR/Solo.out/GeneFull/filtered/");
-            saveRDS(data, "{output.rds}");
-        '
         """
 
 ################################################################################
@@ -655,15 +645,15 @@ rule copy_final_sample_outputs:
         cp -r {input.multiqc_data} {output.multiqc_data}
         """
 
-rule copy_final_gene_matrix:
+rule copy_final_solo_out:
     input:
-        "pipeline_output/{sample}/rna_STAR/gene_matrix.rds",
+        "pipeline_output/{sample}/rna_STAR/Log.final.out",
     output:
-        "final_output/{sample}/gene_matrix.rds",
+        directory("final_output/{sample}/Solo.out"),
     shell:
         """
         mkdir -p final_output/{wildcards.sample}
-        cp {input} {output}
+        cp -r pipeline_output/{wildcards.sample}/rna_STAR/Solo.out {output}
         """
 
 ################################################################################

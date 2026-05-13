@@ -2,6 +2,8 @@
 
 This repository contains the data preprocessing and QC pipeline, plus downstream analysis and visualization code, for [Lee, Fu et al., *Nature* 2025](https://www.nature.com/articles/s41586-025-09478-x). The Snakemake workflow (`main/Snakefile`) processes raw sequencing data through these main targets:
 
+To access the processed `.cg` files: https://huggingface.co/datasets/HBBWS/Spatial-DMT
+
 - **`final_output`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in processing, RNA alignment and gene matrix generation, QC reports, and collection of final deliverables under `final_output/`
 - **`qc`** — BISCUIT QC tables, spatial heatmaps, MultiQC report, self-contained HTML report, and per-feature mean methylation summaries
 - **`allc`** — all-cytosine pileup and non-CpG feature methylation summaries (run before `clean`)
@@ -129,7 +131,6 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 | `REF_DIR` | Root directory of reference files |
 | `BBDUK` | Path to `bbduk.sh` executable |
 | `PYTHON` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
-| `RSCRIPT` | Rscript executable with Seurat available for writing `gene_matrix.rds` |
 
 #### Pipeline steps
 
@@ -147,7 +148,7 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 7. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
 8. `rna_filter_L2` — bbduk: retain reads containing linker 2 sequence
 9. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
-10. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification
+10. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification; outputs raw and filtered count matrices under `Solo.out/GeneFull/`
 
 #### Outputs
 
@@ -174,7 +175,7 @@ final_output/{sample}/
   qc_report.html           # self-contained QC report
   multiqc_report.html      # MultiQC report
   multiqc_report_data/     # MultiQC parsed data and assets
-  gene_matrix.rds          # RNA gene expression matrix, RNA samples only
+  Solo.out/                # STARsolo count matrices (raw/ and filtered/), RNA samples only
 ```
 
 ### 2. Quality control
