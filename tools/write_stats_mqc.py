@@ -5,6 +5,8 @@ and bulk ChromHMM methylation levels (TssA, Tx) derived from a yame summary file
 
 Reads:
   - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, ...)
+                                  Older trim runs may have Reads_detected
+                                  instead of Reads_total.
   - {sample}_spatial_barcode_counts.tsv (per-barcode: barcode, x, y, dna_reads, ...)
   - {sample}_chromhmm_summary.tsv (yame summary output)
 
@@ -46,6 +48,8 @@ def main():
                     pass
 
     n_total   = stats.get('Reads_total')
+    if n_total is None:
+        n_total = stats.get('Reads_detected')
     n_linkers = stats.get('Reads_passed')
 
     # Read bulk ChromHMM methylation levels from summary file

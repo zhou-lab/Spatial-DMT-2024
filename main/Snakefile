@@ -433,12 +433,13 @@ rule rna_star_solo:
 # Run after preprocessing: snakemake --profile profiles/local_HPC -- qc
 ################################################################################
 
-# Run BISCUIT's QC.sh on every per-barcode BAM (including UNMATCHED) using its pileup VCF.
+# Run BISCUIT's QC.sh on every per-barcode BAM using its pileup VCF.
+# UNMATCHED is included when both BAM and VCF are present, but remains optional
+# for pre-seeded legacy intermediates that only contain designed barcodes.
 # Results are merged into a single set of tables for MultiQC.
 rule qc_biscuit:
     input:
         align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
-        unmatched = "pipeline_output/{sample}/bam/UNMATCHED.bam",
         cg        = "pipeline_output/{sample}/pileup/{sample}.cg",
     output:
         flag = "pipeline_output/{sample}/qc/biscuit_qc/.done",
@@ -465,14 +466,21 @@ rule qc_biscuit:
                 {wildcards.sample}_{{}} \
                 pipeline_output/{wildcards.sample}/bam/{{}}.bam" \
             < {input.align_txt}
-        $QC -o pipeline_output/{wildcards.sample}/qc/biscuit_qc/ \
-            --vcf pipeline_output/{wildcards.sample}/tmp/pileup/UNMATCHED.vcf.gz \
-            --cg-file {input.cg} \
-            --barcode UNMATCHED \
-            {params.assets} \
-            {params.ref_fasta} \
-            {wildcards.sample}_UNMATCHED \
-            {input.unmatched}
+
+        unmatched_bam=pipeline_output/{wildcards.sample}/bam/UNMATCHED.bam
+        unmatched_vcf=pipeline_output/{wildcards.sample}/tmp/pileup/UNMATCHED.vcf.gz
+        if [[ -s "$unmatched_bam" && -s "$unmatched_vcf" ]]; then
+            $QC -o pipeline_output/{wildcards.sample}/qc/biscuit_qc/ \
+                --vcf "$unmatched_vcf" \
+                --cg-file {input.cg} \
+                --barcode UNMATCHED \
+                {params.assets} \
+                {params.ref_fasta} \
+                {wildcards.sample}_UNMATCHED \
+                "$unmatched_bam"
+        else
+            echo "Skipping UNMATCHED BISCUIT QC: missing $unmatched_bam or $unmatched_vcf"
+        fi
         touch {output.flag}
         """
 
@@ -505,6 +513,21 @@ if GENOME_FOR_PATH == "hg38":
     FEATS = ["ChromHMM.20220303", "Win100k.20220228", "Chromosome.20221129"]
 else:
     FEATS = ["ChromHMM.20220414", "Win100k.20220228", "Win1m.20230709", "Chromosome.20221129"]
+
+FEATURE_CM_FALLBACKS = {
+    "mm10": {
+        "Chromosome.20221129": "Chromosome.20240119",
+    },
+}
+
+def feature_cm_path(feat):
+    default = os.path.join(FEATURE_CM_DIR, f"{feat}.cm")
+    if os.path.exists(default):
+        return default
+    fallback = FEATURE_CM_FALLBACKS.get(GENOME_FOR_PATH, {}).get(feat)
+    if fallback:
+        return os.path.join(FEATURE_CM_DIR, f"{fallback}.cm")
+    return default
 
 # Per-barcode read counts, spatial mapping, and QC heatmap plots
 rule qc_barcode_summary:
@@ -590,6 +613,8 @@ rule feature_mean:
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),
     output:
         txt = "pipeline_output/{sample}/qc/features/{feat}.txt.gz",
+    params:
+        cm = lambda wildcards: feature_cm_path(wildcards.feat),
     resources:
         mem = "120G",
         time = "6:00:00",
@@ -601,7 +626,7 @@ rule feature_mean:
         rm -rf $tmp && mkdir -p $tmp
         cut -f1 {input.cg}.idx | parallel -j {resources.cpus_per_task} \
             'yame subset {input.cg} {{}} | \
-                yame summary -q {{}} -m {FEATURE_CM_DIR}/{wildcards.feat}.cm - | \
+                yame summary -q {{}} -m {params.cm} - | \
                 gzip -c > '"$tmp"'/{{}}.txt.gz'
         zcat $tmp/*.txt.gz | awk 'NR==1 || $1 != "QFile"' | gzip -c > {output.txt}
         rm -rf $tmp
