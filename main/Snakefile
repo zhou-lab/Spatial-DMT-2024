@@ -20,18 +20,81 @@ elif GENOME.startswith("mm10"):
 else:
     raise ValueError(f"Unsupported genome: {GENOME}. Must be hg38 or mm10 based.")
 
-# Discover samples: explicit IDS list or auto-detect from fastq/*/DNA_1.fq* on disk
-if "IDS" in config:
-    SAMPLES = config["IDS"].split(",")
-else:
-    DNA_FILES = glob.glob(os.path.join("fastq", "*/DNA_1.fq*"))
-    SAMPLES = sorted(list(set([os.path.dirname(f).split(os.sep)[-1] for f in DNA_FILES])))
+FASTQ_EXTS = [".fq.gz", ".fq", ".fastq.gz", ".fastq"]
+WHITELIST_EXTS = [".txt", ".tsv", ".csv", ""]
+IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".tif", ".tiff"]
 
-RNA_SAMPLES = [s for s in SAMPLES if any(
-    os.path.exists(os.path.join("fastq", s, f"RNA_1{ext}"))
-    for ext in [".fq.gz", ".fq", ".fastq.gz", ".fastq"]
-)]
-print(f"Detected samples: {SAMPLES} in fastq/ ({len(RNA_SAMPLES)} with RNA)")
+def config_list(key):
+    value = config.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+def sample_file_candidates(sample, stem, extensions):
+    return [os.path.join(sample, stem + ext) for ext in extensions]
+
+def find_sample_file(sample, stem, extensions):
+    for path in sample_file_candidates(sample, stem, extensions):
+        if os.path.lexists(path):
+            return path
+    return None
+
+def require_sample_file(sample, stem, extensions):
+    return find_sample_file(sample, stem, extensions) or sample_file_candidates(sample, stem, extensions)[0]
+
+def sample_has_pair(sample, stem1, stem2, extensions):
+    return (
+        find_sample_file(sample, stem1, extensions) is not None and
+        find_sample_file(sample, stem2, extensions) is not None
+    )
+
+def sample_has_optional_pair(sample, stem1, stem2, extensions, label):
+    has1 = find_sample_file(sample, stem1, extensions) is not None
+    has2 = find_sample_file(sample, stem2, extensions) is not None
+    if has1 != has2:
+        raise ValueError(
+            f"Sample '{sample}' has incomplete {label} inputs. "
+            f"Expected both {sample}/{stem1}* and {sample}/{stem2}*."
+        )
+    return has1
+
+def discover_samples():
+    samples = []
+    for path in glob.glob("*"):
+        if not os.path.isdir(path):
+            continue
+        sample = os.path.basename(path.rstrip(os.sep))
+        if sample_has_pair(sample, "fastq.1", "fastq.2", FASTQ_EXTS):
+            samples.append(sample)
+    return sorted(samples)
+
+def validate_dna_samples(samples):
+    missing = [
+        sample for sample in samples
+        if not sample_has_pair(sample, "fastq.1", "fastq.2", FASTQ_EXTS)
+    ]
+    if missing:
+        raise ValueError(
+            "Samples missing DNA inputs in the sample-root layout: "
+            f"{', '.join(missing)}. Expected <sample>/fastq.1* and <sample>/fastq.2*."
+        )
+
+# Discover samples from the sample-root layout: <sample>/fastq.1* and <sample>/fastq.2*
+SAMPLES = config_list("IDS") if "IDS" in config else discover_samples()
+if not SAMPLES:
+    raise ValueError(
+        "No samples found. Expected <sample>/fastq.1* and <sample>/fastq.2*, "
+        "or set --config IDS=sample1,sample2."
+    )
+validate_dna_samples(SAMPLES)
+
+RNA_SAMPLES = [
+    sample for sample in SAMPLES
+    if sample_has_optional_pair(sample, "rna.1", "rna.2", FASTQ_EXTS, "RNA")
+]
+print(f"Detected samples from sample-root inputs: {SAMPLES} ({len(RNA_SAMPLES)} with RNA)")
 
 def require_config(key):
     if key not in config:
@@ -45,14 +108,36 @@ REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 
-# Resolve input fastq path, supporting .fq/.fastq with or without .gz
-def get_fastq(wildcards, prefix):
-    sample_dir = os.path.join("fastq", wildcards.sample)
-    for ext in [".fq.gz", ".fq", ".fastq.gz", ".fastq"]:
-        path = os.path.join(sample_dir, prefix + ext)
-        if os.path.exists(path):
-            return path
-    return os.path.join(sample_dir, prefix + ".fq")
+# Resolve sample-root inputs, supporting .fq/.fastq with or without .gz
+def get_fastq(wildcards, stem):
+    return require_sample_file(wildcards.sample, stem, FASTQ_EXTS)
+
+def get_whitelist(wildcards, stem, default_path):
+    return find_sample_file(wildcards.sample, stem, WHITELIST_EXTS) or default_path
+
+def get_spatial_whitelist(wildcards):
+    return get_whitelist(
+        wildcards,
+        "barcode.1",
+        os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+    )
+
+def get_rna_whitelist(wildcards):
+    return get_whitelist(
+        wildcards,
+        "rna_barcode.1",
+        os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt"),
+    )
+
+def find_sample_image(sample):
+    return find_sample_file(sample, "img", IMAGE_EXTS)
+
+def get_sample_image(wildcards):
+    return find_sample_image(wildcards.sample) or []
+
+def get_sample_image_arg(wildcards):
+    path = find_sample_image(wildcards.sample)
+    return f"--img {path}" if path else ""
 
 # Main entry point: run preprocessing, QC, and collect deliverables in final_output/
 rule final_output:
@@ -75,9 +160,9 @@ rule final_output:
 
 rule dna_trim_and_demux:
     input:
-        r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
-        r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
-        wl = os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+        r1 = lambda wildcards: get_fastq(wildcards, "fastq.1"),
+        r2 = lambda wildcards: get_fastq(wildcards, "fastq.2"),
+        wl = get_spatial_whitelist,
     output:
         r1_out    = "pipeline_output/{sample}/trim/{sample}_R1.fq.gz",
         r2_out    = "pipeline_output/{sample}/trim/{sample}_R2.fq.gz",
@@ -318,8 +403,8 @@ STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
 # Keep only R2 reads that contain the spatial primer sequence (identifies valid library molecules)
 rule rna_filter_primer:
     input:
-        in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
-        in2 = lambda wildcards: get_fastq(wildcards, "RNA_2"),
+        in1 = lambda wildcards: get_fastq(wildcards, "rna.1"),
+        in2 = lambda wildcards: get_fastq(wildcards, "rna.2"),
     output:
         out1 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
         out2 = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
@@ -406,7 +491,7 @@ rule rna_star_solo:
     input:
         read_BC  = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
         read_Seq = "pipeline_output/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
-        wl       = os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt"),
+        wl       = get_rna_whitelist,
     output:
         sam = "pipeline_output/{sample}/rna_STAR/Aligned.out.sam",
         log = "pipeline_output/{sample}/rna_STAR/Log.final.out",
@@ -534,10 +619,13 @@ rule qc_barcode_summary:
     input:
         dmux_done = "pipeline_output/{sample}/dmux/_merged_done.flag",
         align_txt = "pipeline_output/{sample}/dmux/align_list.txt",
-        whitelist = os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+        whitelist = get_spatial_whitelist,
+        img = get_sample_image,
     output:
         spatial_counts = "pipeline_output/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = "pipeline_output/{sample}/qc/plots/.done",
+    params:
+        img_arg = get_sample_image_arg,
     resources:
         mem = "12G",
         cpus_per_task = 4,
@@ -549,7 +637,7 @@ rule qc_barcode_summary:
             --whitelist  {input.whitelist} \
             --sample     {wildcards.sample} \
             --table-dir  pipeline_output/{wildcards.sample}/qc/table/ \
-            --plots-dir  pipeline_output/{wildcards.sample}/qc/plots/
+            --plots-dir  pipeline_output/{wildcards.sample}/qc/plots/ {params.img_arg}
         touch {output.plots_done}
         """
 

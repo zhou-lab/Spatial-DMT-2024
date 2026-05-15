@@ -1,7 +1,18 @@
+import os
+
 configfile: "/mnt/isilon/zhoulab/labpipelines/references/CHOP_HPC.yaml"
 
 ref = config[config["ref"]]
 IDS = config["ID"].split(",")
+FASTQ_EXTS = [".fq.gz", ".fq", ".fastq.gz", ".fastq"]
+
+def sample_fastq(wildcards, read):
+    stem = os.path.join(wildcards.id, f"fastq.{read}")
+    for ext in FASTQ_EXTS:
+        path = stem + ext
+        if os.path.lexists(path):
+            return path
+    return stem + FASTQ_EXTS[0]
 
 rule all:
   input:
@@ -19,8 +30,8 @@ rule extract_filteredout_all:
 
 rule extract_filteredout_reads:
   input:
-    r1 = "fastq/{id}_1.fq.gz",
-    r2 = "fastq/{id}_2.fq.gz",
+    r1 = lambda wildcards: sample_fastq(wildcards, 1),
+    r2 = lambda wildcards: sample_fastq(wildcards, 2),
   output:
     r1_out = "tmp/filteredout/{id}/{id}_filteredout_R1.fq.gz",
     r2_out = "tmp/filteredout/{id}/{id}_filteredout_R2.fq.gz",

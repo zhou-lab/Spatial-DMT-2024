@@ -80,18 +80,20 @@ The preprocessing pipeline processes spatial DNA methylation and (optionally) sp
 
 #### Input data structure
 
-The `barcodes/` directory is provided with this repository. Users only need to supply the raw FASTQ files:
+The `barcodes/` directory is provided with this repository. Users supply one top-level directory per sample:
 
 ```
-fastq/
-  {sample}/
-    DNA_1.fq.gz   # DNA methylation read 1 (genomic sequence)
-    DNA_2.fq.gz   # DNA methylation read 2 (spatial barcode + adapter)
-    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)  [optional]
-    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)  [optional]
+{sample}/
+  fastq.1.fq.gz        # DNA methylation read 1 (genomic sequence)
+  fastq.2.fq.gz        # DNA methylation read 2 (spatial barcode + adapter)
+  barcode.1.txt        # DNA spatial barcode whitelist [optional]
+  img.png              # tissue image underlay for spatial QC plots [optional]
+  rna.1.fq.gz          # RNA read 1 (cDNA sequence)  [optional]
+  rna.2.fq.gz          # RNA read 2 (spatial barcode + UMI)  [optional]
+  rna_barcode.1.txt    # RNA barcode whitelist [optional]
 ```
 
-Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`. RNA processing is automatically skipped for samples where `RNA_1.fq*` is absent; the QC report will contain DNA-only metrics for those samples.
+Samples are auto-detected from `<sample>/fastq.1.*` and `<sample>/fastq.2.*`, or specified explicitly with `--config IDS=sample1,sample2`. FASTQ inputs may use `.fq.gz`, `.fastq.gz`, `.fq`, or `.fastq`. Sample-local barcode files are used when present; otherwise the workflow falls back to `barcodes/spatial_barcodes.txt` and `barcodes/RNA_whitelist_singlecol.txt`. If `<sample>/img.{png,jpg,jpeg,tif,tiff}` is present, it is used as the underlay for spatial QC heatmaps; otherwise plots are drawn without an image underlay. RNA processing is automatically skipped unless both `<sample>/rna.1.*` and `<sample>/rna.2.*` are present; the QC report will contain DNA-only metrics for those samples.
 
 #### Running the pipeline
 
@@ -142,7 +144,7 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 4. `dna_biscuit_align_lambda` — Align lambda spike-in reads to the lambda genome for bisulfite conversion efficiency estimation
 5. `dna_biscuit_pileup_lambda` — Pileup on lambda BAM; produces allc.bed for conversion efficiency calculation
 
-**RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
+**RNA branch (runs in parallel with DNA; skipped unless `rna.1.*` and `rna.2.*` are present):**
 
 6. `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
 7. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
