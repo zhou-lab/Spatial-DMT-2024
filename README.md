@@ -132,6 +132,24 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 | `BBDUK` | Path to `bbduk.sh` executable |
 | `PYTHON` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
 
+Optional path config keys (override via `--config KEY=VALUE` or in profile config.yaml). Defaults are cwd-relative, so the historical "run snakemake from the workdir" pattern still works unchanged.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `FASTQ_DIR` | `fastq` | Root containing `{sample}/{DNA,RNA}_{1,2}.fq.gz`. Accepts absolute paths. |
+| `WORKDIR` | `pipeline_output` | Intermediate outputs (per-barcode BAMs, VCFs, qc/). Accepts absolute paths. |
+| `OUTDIR` | `final_output` | Per-sample deliverable bundle (`.cg`, qc reports, gene matrix). Accepts absolute paths. |
+
+Example with absolute paths (keeps intermediates and deliverables on separate disks):
+```bash
+snakemake --profile "$REPO/profiles/slurm" \
+    --snakefile "$REPO/main/Snakefile" \
+    --config ref=mm10 \
+        FASTQ_DIR=/scratch/run42/fastq \
+        WORKDIR=/scratch/run42/pipeline_output \
+        OUTDIR=/results/run42
+```
+
 #### Pipeline steps
 
 **DNA methylation branch:**
