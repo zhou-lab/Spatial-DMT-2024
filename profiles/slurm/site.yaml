@@ -5,7 +5,7 @@
 REF_DIR: "/mnt/isilon/zhou_lab/projects/20191221_references/"
 BBDUK: "/mnt/isilon/zhoulab/labsoftware/bbmap/bbduk.sh"
 PYTHON: "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/python"
-RSCRIPT: "/mnt/isilon/zhoulab/labsoftware/shared_Renv/shims/Rscript-4.6.0"
+RSCRIPT: "/mnt/isilon/zhoulab/labsoftware/shared_Renv/versions/4.6.0/bin/R --slave"
 
 # Genome reference paths (relative to REF_DIR)
 Lambda:
