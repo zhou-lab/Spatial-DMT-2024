@@ -139,6 +139,7 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 | `FASTQ_DIR` | `fastq` | Root containing `{sample}/{DNA,RNA}_{1,2}.fq.gz`. Accepts absolute paths. |
 | `WORKDIR` | `pipeline_output` | Intermediate outputs (per-barcode BAMs, VCFs, qc/). Accepts absolute paths. |
 | `OUTDIR` | `final_output` | Per-sample deliverable bundle (`.cg`, qc reports, gene matrix). Accepts absolute paths. |
+| `protocol` | `spatialdmt` | R2 chemistry: `spatialdmt` (50×50 grid, 8+8 bp barcodes) or `smcseq` (96×96 grid, 11+11 bp barcodes). See [R2 chemistry](#r2-chemistry-protocol-switch) for grammar details. |
 
 Example with absolute paths (keeps intermediates and deliverables on separate disks):
 ```bash
@@ -149,6 +150,50 @@ snakemake --profile "$REPO/profiles/slurm" \
         WORKDIR=/scratch/run42/pipeline_output \
         OUTDIR=/results/run42
 ```
+
+#### R2 chemistry (protocol switch)
+
+R2 carries the spatial barcode flanked by linker sequences. Two grammars are supported via the `protocol` config key.
+
+**`spatialdmt`** (default, 50×50 grid):
+
+```
+R2 = [8 BC1][30 linker1][8 BC2][30 linker2][19 AGATGTGTATAAGAGATAG][genomic]
+       │       │           │       │           │
+       │       │           │       │           └── Tn5 mosaic-end + flank        (fuzzy ≤1)
+       │       │           │       └── ATTTATGTGTTTGAGAGGTTAGAGTATTTG            (fuzzy ≤2)
+       │       │           └── 8 bp immediately before linker2
+       │       └── GTGGTTGATGTTTTGTATTGGTGTATGATT                                 (fuzzy ≤2)
+       └── 8 bp immediately before linker1; concat with BC2 = 16-mer whitelist key
+
+Barcode key     : 16 bp (8 + 8)
+Whitelist       : barcodes/spatial_barcodes.txt  (2500 rows = 50 × 50, col 4)
+Total R2 prefix : 95 bp before genomic
+```
+
+**`smcseq`** (96×96 grid):
+
+```
+R2 = [19 GGTGTAGTGGGTTTGGAGG][11 BC1][30 linker1][11 BC2][30 linker2][8 AGATGTGT][1 UMI][genomic]
+       │                       │       │           │       │           │           │
+       │                       │       │           │       │           │           └── discarded
+       │                       │       │           │       │           └── Tn5 ME anchor   (fuzzy ≤2)
+       │                       │       │           │       └── linker2 (W): CCC.....C..CC....C...C...CC...
+       │                       │       │           │                  (C): TTT.....T..TT....T...T...TT...   (fuzzy ≤4)
+       │                       │       │           └── 11 bp immediately before linker2
+       │                       │       └── linker1 (W): ..CC.C...C.....C.C.C..C...C...
+       │                       │                  (C): ..TT.T...T.....T.T.T..T...T...   (fuzzy ≤4)
+       │                       └── 11 bp immediately before linker1; concat with BC2 = 22-mer key
+       └── primer anchored at pos 0                                                       (fuzzy ≤3)
+
+Barcode key     : 22 bp (11 + 11)
+Whitelist       : barcodes/smcseq_barcodes_22mer.txt  (9216 rows = 96 × 96, col 1)
+Total R2 prefix : 110 bp before genomic
+Strand handling : both linker variants (W = C-preserved, C = C→T BS-converted) are tried
+                  per read; BISCUIT auto-handles strand at alignment, no Watson/Crick split
+```
+
+Switch with `--config protocol=smcseq`.
 
 #### Pipeline steps
 

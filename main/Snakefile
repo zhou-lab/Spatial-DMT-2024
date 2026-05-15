@@ -51,6 +51,18 @@ REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 
+## R2 chemistry: spatialdmt (Fan-lab 50x50, 8+8bp barcodes — default)
+##           or smcseq (Liu-lab 96x96, 11+11bp + GGTGTAGTGGGTTTGGAGG primer)
+PROTOCOL = config.get("protocol", "spatialdmt")
+if PROTOCOL == "smcseq":
+    BARCODE_WHITELIST = os.path.join(BARCODES_DIR, "smcseq_barcodes_22mer.txt")
+    BARCODE_WL_COL    = 1
+elif PROTOCOL == "spatialdmt":
+    BARCODE_WHITELIST = os.path.join(BARCODES_DIR, "spatial_barcodes.txt")
+    BARCODE_WL_COL    = 4
+else:
+    raise ValueError(f"Unknown protocol '{PROTOCOL}'. Expected spatialdmt or smcseq.")
+
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
 def get_fastq(wildcards, prefix):
     sample_dir = os.path.join(FASTQ_DIR, wildcards.sample)
@@ -83,7 +95,7 @@ rule dna_trim_and_demux:
     input:
         r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
-        wl = os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+        wl = BARCODE_WHITELIST,
     output:
         r1_out    = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
         r2_out    = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
@@ -123,8 +135,9 @@ rule dna_trim_and_demux:
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
                     AATCATACACCAATACAAAACATCAACCAC \
                     CAAATACTCTAACCTCTCAAACACATAAAT \
+                --protocol {PROTOCOL} \
                 --whitelist {input.wl} \
-                --whitelist_col 4 \
+                --whitelist_col {BARCODE_WL_COL} \
                 --dmux_dir {WORKDIR}/{wildcards.sample}/tmp/dmux \
                 --chunk_id "$cid" \
                 --bc-mismatch 1

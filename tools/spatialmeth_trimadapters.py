@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse, gzip, os, sys
+import regex as _regex
 from fuzzysearch import find_near_matches
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -32,21 +33,71 @@ parser.add_argument("read2_fastq")
 parser.add_argument("-o","--output_prefix", default="out")
 parser.add_argument("-a","--adapters", nargs='+',
     default=["CTATCTCTTATA","AGATGCGAGAAGCCAACGCTTG"])
-parser.add_argument("-l1","--linker1", default="GTGGTTGATGTTTTGTATTGGTGTATGATT")
-parser.add_argument("-l2","--linker2", default="ATTTATGTGTTTGAGAGGTTAGAGTATTTG")
-parser.add_argument("-t","--trim_end2", default="AGATGTGTATAAGAGATAG")
+parser.add_argument("--protocol", choices=["spatialdmt","smcseq"], default="spatialdmt",
+    help="spatialdmt = Fan-lab 50x50 8+8bp barcodes (default); "
+         "smcseq = Liu-lab 96x96 11+11bp barcodes with GGTGTAGTGGGTTTGGAGG primer")
+parser.add_argument("-l1","--linker1", default=None)
+parser.add_argument("-l2","--linker2", default=None)
+parser.add_argument("-t","--trim_end2", default=None)
 parser.add_argument("--min_len", type=int, default=10, help="min length after trimming")
 parser.add_argument("--whitelist", help="whitelist file (barcode in column --whitelist_col)")
-parser.add_argument("--whitelist_col", type=int, default=4)
+parser.add_argument("--whitelist_col", type=int, default=None)
 parser.add_argument("--dmux_dir", help="dir to write per-barcode FASTQs for this chunk")
 parser.add_argument("--chunk_id", default="", help="chunk ID suffix")
-parser.add_argument("--barcode_len", type=int, default=16)
+parser.add_argument("--bc-side-len", type=int, default=None,
+    help="bp per side barcode; auto: 8 for spatialdmt, 11 for smcseq")
+parser.add_argument("--barcode_len", type=int, default=None,
+    help="total barcode length; auto: 2 * bc-side-len")
 parser.add_argument("--bc-mismatch", type=int, default=0,
                     help="allowed barcode mismatches (Hamming); 0 or 1 recommended")
 parser.add_argument("--bc-ambig", choices=["drop","first"], default="drop",
                     help="if multiple 1-mismatch matches: drop or pick first")
 
 args = parser.parse_args()
+
+## Protocol-specific defaults
+if args.protocol == "smcseq":
+    ## Liu-lab spatial 5mC: [19bp primer][11bp BC1][30bp linker1][11bp BC2][30bp linker2][8bp AGATGTGT][1bp UMI][genomic]
+    ## linker1/linker2 each have two variants (Watson C-preserved, Crick C->T) and we try both per read
+    if args.bc_side_len is None: args.bc_side_len = 11
+    if args.trim_end2 is None: args.trim_end2 = "AGATGTGT"
+    if args.whitelist_col is None: args.whitelist_col = 1
+    SMCSEQ_PRIMER  = _regex.compile(r'(GGTGTAGTGGGTTTGGAGG){s<=3}')
+    SMCSEQ_LK1_W   = _regex.compile(r'(..CC.C...C.....C.C.C..C...C...){s<=4}')
+    SMCSEQ_LK1_C   = _regex.compile(r'(..TT.T...T.....T.T.T..T...T...){s<=4}')
+    SMCSEQ_LK2_W   = _regex.compile(r'(CCC.....C..CC....C...C...CC...){s<=4}')
+    SMCSEQ_LK2_C   = _regex.compile(r'(TTT.....T..TT....T...T...TT...){s<=4}')
+    SMCSEQ_TRIM    = _regex.compile(r'(AGATGTGT){s<=2}')
+    SMCSEQ_UMI_LEN = 1
+else:
+    ## spatialdmt (Fan-lab DBiT chemistry):
+    ##   R2 = [8bp BC1][30bp linker1][8bp BC2][30bp linker2][19bp AGATGTGTATAAGAGATAG][genomic]
+    if args.bc_side_len is None: args.bc_side_len = 8
+    if args.linker1 is None: args.linker1 = "GTGGTTGATGTTTTGTATTGGTGTATGATT"
+    if args.linker2 is None: args.linker2 = "ATTTATGTGTTTGAGAGGTTAGAGTATTTG"
+    if args.trim_end2 is None: args.trim_end2 = "AGATGTGTATAAGAGATAG"
+    if args.whitelist_col is None: args.whitelist_col = 4
+
+if args.barcode_len is None:
+    args.barcode_len = 2 * args.bc_side_len
+
+
+def parse_r2_smcseq(s):
+    """Return (bc1_s, bc1_e, bc2_s, bc2_e, genomic_start) or None.
+    Anchors at R2 start; tries both Watson and Crick linker variants per pair."""
+    m = SMCSEQ_PRIMER.match(s)
+    if not m: return None
+    bc1_s = m.end()
+    bc1_e = bc1_s + args.bc_side_len
+    m = SMCSEQ_LK1_W.match(s, pos=bc1_e) or SMCSEQ_LK1_C.match(s, pos=bc1_e)
+    if not m: return None
+    bc2_s = m.end()
+    bc2_e = bc2_s + args.bc_side_len
+    m = SMCSEQ_LK2_W.match(s, pos=bc2_e) or SMCSEQ_LK2_C.match(s, pos=bc2_e)
+    if not m: return None
+    m_te = SMCSEQ_TRIM.match(s, pos=m.end())
+    if not m_te: return None
+    return (bc1_s, bc1_e, bc2_s, bc2_e, m_te.end() + SMCSEQ_UMI_LEN)
 
 dmux_handles_R1 = {}
 dmux_handles_R2 = {}
@@ -122,28 +173,35 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
                 lambda_seq1 = lambda_seq1[:trim_i]
                 lambda_qual1 = lambda_qual1[:trim_i]
 
-        te2 = find_near_matches(args.trim_end2, str(r2seq), max_l_dist=1)
-        if te2:
-            trim2_i = te2[0].end
-            lambda_seq2 = r2seq[trim2_i:]
-            lambda_qual2 = rec2.letter_annotations["phred_quality"][trim2_i:]
+        if args.protocol == "smcseq":
+            parsed = parse_r2_smcseq(str(r2seq))
+            if parsed is None:
+                continue
+            b1s, l1s, b2s, l2s, genomic_start = parsed
+            lambda_seq2 = r2seq[genomic_start:]
+            lambda_qual2 = rec2.letter_annotations["phred_quality"][genomic_start:]
         else:
-            lambda_seq2 = r2seq
-            lambda_qual2 = rec2.letter_annotations["phred_quality"]
+            te2 = find_near_matches(args.trim_end2, str(r2seq), max_l_dist=1)
+            if te2:
+                trim2_i = te2[0].end
+                lambda_seq2 = r2seq[trim2_i:]
+                lambda_qual2 = rec2.letter_annotations["phred_quality"][trim2_i:]
+            else:
+                lambda_seq2 = r2seq
+                lambda_qual2 = rec2.letter_annotations["phred_quality"]
+            ## lambda write may precede demux fail (kept for spatialdmt parity)
+            if is_barcode85 and len(lambda_seq1) >= args.min_len and len(lambda_seq2) >= args.min_len:
+                write_fastq_record(lambda_r1_out, rec1.id, lambda_seq1, lambda_qual1)
+                write_fastq_record(lambda_r2_out, rec2.id, lambda_seq2, lambda_qual2)
+                n_written_barcode85 += 1
+            lk1 = find_near_matches(args.linker1, str(r2seq), max_l_dist=2)
+            lk2 = find_near_matches(args.linker2, str(r2seq), max_l_dist=2)
+            if not (len(lk1)==1 and len(lk2)==1 and len(te2)==1):
+                continue
+            l1s = lk1[0].start; l2s = lk2[0].start
+            b1s = max(0, l1s - args.bc_side_len)
+            b2s = max(0, l2s - args.bc_side_len)
 
-        if is_barcode85 and len(lambda_seq1) >= args.min_len and len(lambda_seq2) >= args.min_len:
-            write_fastq_record(lambda_r1_out, rec1.id, lambda_seq1, lambda_qual1)
-            write_fastq_record(lambda_r2_out, rec2.id, lambda_seq2, lambda_qual2)
-            n_written_barcode85 += 1
-
-        lk1 = find_near_matches(args.linker1, str(r2seq), max_l_dist=2)
-        lk2 = find_near_matches(args.linker2, str(r2seq), max_l_dist=2)
-        if not (len(lk1)==1 and len(lk2)==1 and len(te2)==1):
-            continue
-
-        # Barcode from 8bp before each linker (concat = 16bp)
-        l1s = lk1[0].start; l2s = lk2[0].start
-        b1s = max(0, l1s-8); b2s = max(0, l2s-8)
         barcode = str(r2seq[b1s:l1s] + r2seq[b2s:l2s])
         
         if barcode in barcode_cnt:
@@ -211,7 +269,9 @@ for h in dmux_handles_R2.values():
 # Write per-chunk barcode list/counts (for later merging)
 # barcodes file (sorted desc)
 if dmux_counts_R1 or dmux_counts_R2:
-    os.makedirs(os.path.dirname(args.output_prefix), exist_ok=True)
+    _outdir = os.path.dirname(args.output_prefix)
+    if _outdir:
+        os.makedirs(_outdir, exist_ok=True)
 
 # Barcodes summary across all passed reads (not only whitelisted)
 # Recompute from dmux_counts_R1 if present, else empty
