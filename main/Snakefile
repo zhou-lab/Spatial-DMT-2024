@@ -604,17 +604,19 @@ rule qc_biscuit_unmatched:
         """
 
 
-## Diagnose the unmatched bucket:
-##   1. align stats per category (SF vs WM) from the BAM
-##   2. SF anchor-fail breakdown from the R2 fastq -- re-runs each protocol
-##      anchor independently and reports the FIRST stage that fails per read
-## Emits a long-format TSV (section, key, value) consumed by qc_report.
+## Diagnose the unmatched bucket. Emits two files:
+##   - tsv: long-format raw breakdown (section, key, value) for human/scripts
+##   - mqc_summary: single MultiQC custom-content table -- per-sample row with
+##     SF/WM reads + mapping rates AND SF anchor-fail breakdown counts
+## The _mqc.tsv lands under qc/biscuit_qc_merged/ which the qc_report rule's
+## multiqc invocation scans -- it automatically appears in the report.
 rule dna_unmatched_diagnostics:
     input:
         bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
         r2_fastq = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
     output:
-        tsv = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
+        tsv         = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
+        mqc_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
     resources:
         mem = "8G",
         time = "4:00:00",
@@ -622,12 +624,14 @@ rule dna_unmatched_diagnostics:
     shell:
         """
         set -xeo pipefail
-        mkdir -p {WORKDIR}/{wildcards.sample}/qc/
+        mkdir -p {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_merged/
         {PYTHON} {workflow.basedir}/../tools/unmatched_diagnostics.py \
             --bam {input.bam} \
             --r2-fastq {input.r2_fastq} \
             --protocol {PROTOCOL} \
-            --out {output.tsv}
+            --sample {wildcards.sample} \
+            --out {output.tsv} \
+            --mqc-summary {output.mqc_summary}
         """
 
 rule qc_biscuit_aggregate:
@@ -687,13 +691,16 @@ rule qc_barcode_summary:
 # MultiQC aggregation + self-contained HTML report
 rule qc_report:
     input:
-        star_log       = lambda wc: fWORKDIR + "/{wc.sample}/rna_STAR/Log.final.out"
-                         if wc.sample in RNA_SAMPLES else [],
+        star_log       = lambda wc: (f"{WORKDIR}/{wc.sample}/rna_STAR/Log.final.out"
+                                     if wc.sample in RNA_SAMPLES else []),
         biscuit_merged = WORKDIR + "/{sample}/qc/biscuit_qc_merged/.done",
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         trim_stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
         cg             = WORKDIR + "/{sample}/pileup/{sample}.cg",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
+        ## unmatched-track diagnostic emits a _mqc.tsv into qc/biscuit_qc_merged/
+        ## that MultiQC's custom-content scanner picks up automatically.
+        unmatched_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
     output:
         multiqc      = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
         multiqc_data = directory(WORKDIR + "/{sample}/qc/html/multiqc_report_data"),

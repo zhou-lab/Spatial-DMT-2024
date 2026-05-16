@@ -123,13 +123,44 @@ def sf_anchor_breakdown(r2_fastq, protocol):
     return counts
 
 
+def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
+    """MultiQC custom-content: single table combining per-category reads +
+    mapping_rate AND the SF anchor-fail breakdown (counts) for the sample.
+    One row per sample so the report aggregates cleanly across runs."""
+    sf = align.get("SF", {"n_reads": 0, "n_mapped": 0})
+    wm = align.get("WM", {"n_reads": 0, "n_mapped": 0})
+    sf_rate = (sf["n_mapped"] / sf["n_reads"]) if sf["n_reads"] else 0.0
+    wm_rate = (wm["n_mapped"] / wm["n_reads"]) if wm["n_reads"] else 0.0
+    if protocol == "smcseq":
+        anchor_stages = ("primer", "linker1", "linker2", "tn5_me")
+    else:
+        anchor_stages = ("linker1", "linker2", "tn5_me", "all_three")
+    cols = ["sf_n_reads", "sf_mapping_rate", "wm_n_reads", "wm_mapping_rate"] \
+         + [f"sf_fail_{s}" for s in anchor_stages]
+    vals = [sf["n_reads"], f"{sf_rate:.4f}", wm["n_reads"], f"{wm_rate:.4f}"] \
+         + [sf_breakdown.get(s, 0) for s in anchor_stages]
+    with open(path, "w") as f:
+        f.write("# id: 'unmatched_summary'\n")
+        f.write("# section_name: 'Unmatched bucket'\n")
+        f.write("# description: 'Reads not routed to a position cell (or to lambda). Columns: SF=structure-fail (R2 grammar parse failed), WM=whitelist-miss (parsed but BC1+BC2 not in whitelist within Hamming-1). sf_fail_* columns count SF reads by the first R2 anchor stage that failed (sequential parse for smcseq, parallel for spatialdmt).'\n")
+        f.write("# plot_type: 'table'\n")
+        f.write("# pconfig:\n")
+        f.write("#     id: 'unmatched_summary_table'\n")
+        f.write("#     title: 'Unmatched bucket'\n")
+        f.write("Sample\t" + "\t".join(cols) + "\n")
+        f.write(f"{sample}\t" + "\t".join(str(v) for v in vals) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bam",      required=True)
     ap.add_argument("--r2-fastq", required=True)
     ap.add_argument("--protocol", required=True, choices=["smcseq", "spatialdmt"])
-    ap.add_argument("--out",      required=True, help="output TSV")
+    ap.add_argument("--sample",   required=True, help="sample name for MultiQC")
+    ap.add_argument("--out",      required=True, help="long-format raw TSV")
+    ap.add_argument("--mqc-summary", required=True,
+                    help="MultiQC custom-content TSV: combined unmatched summary")
     args = ap.parse_args()
 
     align = bam_align_stats(args.bam)
@@ -137,7 +168,8 @@ def main():
 
     with open(args.out, "w") as f:
         f.write("section\tkey\tvalue\n")
-        ## align stats per category
+        ## align stats per category (long-format raw -- keeps mapped + dup for
+        ## the curious; the MultiQC view only surfaces reads + mapping_rate).
         for cat_name, sx in [("structure_fail", "SF"), ("wl_miss", "WM")]:
             c = align.get(sx, {"n_reads": 0, "n_mapped": 0, "n_dup": 0})
             n, m, d = c["n_reads"], c["n_mapped"], c["n_dup"]
@@ -155,17 +187,19 @@ def main():
         for stage in ("primer", "linker1", "linker2", "tn5_me", "all_three", "all_ok"):
             n = sf_breakdown.get(stage, 0)
             if stage == "primer" and args.protocol == "spatialdmt":
-                continue  # spatialdmt has no primer anchor
+                continue
             if stage == "all_three" and args.protocol == "smcseq":
-                continue  # smcseq is sequential, no "all three" bucket
+                continue
             f.write(f"sf_anchor_fail\t{stage}_fail_n\t{n}\n")
             f.write(f"sf_anchor_fail\t{stage}_fail_frac\t{n/total_sf if total_sf else 0:.4f}\n")
         f.write(f"sf_anchor_fail\ttotal_sf\t{total_sf}\n")
 
+    write_mqc_summary(args.mqc_summary, args.sample, align, sf_breakdown, args.protocol)
+
     sys.stderr.write(
-        f"wrote {args.out}: SF={align['SF']['n_reads']} reads, "
-        f"WM={align['WM']['n_reads']} reads; "
-        f"SF anchor-fail: {dict(sf_breakdown)}\n")
+        f"wrote {args.out}, {args.mqc_summary}\n"
+        f"  SF={align['SF']['n_reads']} reads, WM={align['WM']['n_reads']} reads\n"
+        f"  SF anchor-fail: {dict(sf_breakdown)}\n")
 
 
 if __name__ == "__main__":
