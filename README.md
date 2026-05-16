@@ -33,7 +33,14 @@ conda install -c conda-forge -c bioconda \
     r-base \
     r-seurat \
     matplotlib \
-    pandas
+    pandas \
+    scikit-image \
+    py-opencv
+```
+
+**For image processing samples only** (required when `image.png` is provided), install via pip:
+```bash
+pip install imutils
 ```
 
 **For SLURM execution only**, install the cluster-generic executor plugin into your Snakemake environment (not required for local/HPC runs):
@@ -71,6 +78,9 @@ brew install bbtools   # tested: 39.81b
 | [Biopython](https://biopython.org/) | — | conda-forge |
 | matplotlib | — | conda-forge |
 | pandas | — | conda-forge |
+| [scikit-image](https://scikit-image.org/) | — | conda-forge (image samples only) |
+| [OpenCV](https://opencv.org/) (py-opencv) | — | conda-forge (image samples only) |
+| [imutils](https://github.com/jrosebr1/imutils) | — | pip (image samples only) |
 
 ### 1. Data preprocessing
 
@@ -87,11 +97,12 @@ fastq/
   {sample}/
     DNA_1.fq.gz   # DNA methylation read 1 (genomic sequence)
     DNA_2.fq.gz   # DNA methylation read 2 (spatial barcode + adapter)
-    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)  [optional]
-    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI)  [optional]
+    RNA_1.fq.gz   # RNA read 1 (cDNA sequence)         [optional]
+    RNA_2.fq.gz   # RNA read 2 (spatial barcode + UMI) [optional]
+    image.png     # tissue image (phase contrast)        [optional]
 ```
 
-Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`. RNA processing is automatically skipped for samples where `RNA_1.fq*` is absent; the QC report will contain DNA-only metrics for those samples.
+Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with `--config IDS=sample1,sample2`. RNA processing is automatically skipped for samples where `RNA_1.fq*` is absent. Image processing is automatically skipped for samples where `image.png` is absent. The QC report will contain DNA-only metrics for samples without RNA.
 
 #### Running the pipeline
 
@@ -150,6 +161,10 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 9. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
 10. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification; outputs raw and filtered count matrices under `Solo.out/GeneFull/`
 
+**Image processing branch (runs in parallel with DNA/RNA; skipped if `image.png` is absent):**
+
+11. `image_processing` — Converts the phase contrast tissue image to a binary mask via adaptive thresholding, maps the 50×50 spatial grid onto the mask to identify in-tissue spots, and writes `tissue_positions_list.csv` and `scalefactors_json.json` compatible with 10x Visium downstream tools. Two optional config keys control sensitivity: `block_size` (default 35) and `C_normalized` (default 0.1).
+
 #### Outputs
 
 ```
@@ -163,6 +178,7 @@ pipeline_output/{sample}/
   tmp/               # all intermediates removed by clean: pileup VCFs, per-barcode .cg files, filtered FASTQs
   rna_bbduk/         # bbduk filter stats per step
   rna_STAR/          # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
+  spatial/           # tissue_positions_list.csv, scalefactors_json.json, ROI_binary.png, align check image (image samples only)
 ```
 
 The `final_output` target copies the primary deliverables into one sample-organized directory:
@@ -176,6 +192,7 @@ final_output/{sample}/
   multiqc_report.html      # MultiQC report
   multiqc_report_data/     # MultiQC parsed data and assets
   Solo.out/                # STARsolo count matrices (raw/ and filtered/), RNA samples only
+  spatial/                 # tissue_positions_list.csv, scalefactors_json.json, tissue_lowres_image.png, image samples only
 ```
 
 ### 2. Quality control

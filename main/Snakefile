@@ -41,9 +41,11 @@ def require_config(key):
         )
     return config[key]
 
-REF_DIR      = require_config("REF_DIR")
-PYTHON       = require_config("PYTHON")
-BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
+REF_DIR       = require_config("REF_DIR")
+PYTHON        = require_config("PYTHON")
+BARCODES_DIR  = os.path.join(workflow.basedir, "..", "barcodes")
+TOOLS_DIR     = os.path.join(workflow.basedir, "..", "tools")
+IMAGE_SAMPLES = [s for s in SAMPLES if os.path.exists(os.path.join("fastq", s, "image.png"))]
 
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
 def get_fastq(wildcards, prefix):
@@ -68,6 +70,7 @@ rule final_output:
         expand("final_output/{sample}/multiqc_report.html", sample=SAMPLES),
         expand("final_output/{sample}/multiqc_report_data", sample=SAMPLES),
         expand("final_output/{sample}/Solo.out", sample=RNA_SAMPLES),
+        expand("final_output/{sample}/spatial", sample=IMAGE_SAMPLES),
 
 ################################################################################
 # DNA Pipeline Rules
@@ -429,6 +432,48 @@ rule rna_star_solo:
         """
 
 ################################################################################
+# Image Processing Rules (optional; runs when fastq/{sample}/image.png exists)
+################################################################################
+
+rule image_processing:
+    input:
+        image    = "fastq/{sample}/image.png",
+        barcodes = os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+    output:
+        tissue_positions = "pipeline_output/{sample}/spatial/tissue_positions_list.csv",
+        scalefactors     = "pipeline_output/{sample}/spatial/scalefactors_json.json",
+        tissue_lowres    = "pipeline_output/{sample}/spatial/tissue_lowres_image.png",
+        roi_binary       = "pipeline_output/{sample}/spatial/ROI_binary.png",
+        align_check      = "pipeline_output/{sample}/spatial/tissue_lowres_image_align_check.png",
+    params:
+        block_size   = config.get("block_size", 35),
+        c_normalized = config.get("C_normalized", 0.1),
+    resources:
+        mem          = "8G",
+        time         = "01:00:00",
+        cpus_per_task = 1,
+    shell:
+        """
+        set -xe
+        tmpdir=pipeline_output/{wildcards.sample}/tmp/image_proc
+        mkdir -p $tmpdir
+        cp {input.image} $tmpdir/image.png
+        cp {input.barcodes} $tmpdir/spatial_barcodes.txt
+        img_res=$({PYTHON} -c "from PIL import Image; img=Image.open('{input.image}'); print(min(img.size))")
+        ( cd $tmpdir && {PYTHON} {TOOLS_DIR}/Image_processing+tissue_positions_list.py \
+            --img_path image.png \
+            --block_size {params.block_size} \
+            --C_normalized {params.c_normalized} \
+            --img_res $img_res )
+        mkdir -p pipeline_output/{wildcards.sample}/spatial
+        cp $tmpdir/spatial/tissue_positions_list.csv {output.tissue_positions}
+        cp $tmpdir/spatial/scalefactors_json.json    {output.scalefactors}
+        cp {input.image}                             {output.tissue_lowres}
+        cp $tmpdir/ROI_binary.png                    {output.roi_binary}
+        cp $tmpdir/tissue_lowres_image_align_check.png {output.align_check}
+        """
+
+################################################################################
 # QC Rules
 # Run after preprocessing: snakemake --profile profiles/local_HPC -- qc
 ################################################################################
@@ -504,7 +549,7 @@ CHROMHMM_CM    = os.path.join(REF_DIR, ref["REF_BASE"], ref["CHROMHMM_CM"])
 if GENOME_FOR_PATH == "hg38":
     FEATS = ["ChromHMM.20220303", "Win100k.20220228", "Chromosome.20221129"]
 else:
-    FEATS = ["ChromHMM.20220414", "Win100k.20220228", "Win1m.20230709", "Chromosome.20221129"]
+    FEATS = ["ChromHMM.20220414", "Win100k.20220228", "Win1m.20230709", "Chromosome.20240119"]
 
 # Per-barcode read counts, spatial mapping, and QC heatmap plots
 rule qc_barcode_summary:
@@ -643,6 +688,17 @@ rule copy_final_sample_outputs:
         cp {input.multiqc} {output.multiqc}
         rm -rf {output.multiqc_data}
         cp -r {input.multiqc_data} {output.multiqc_data}
+        """
+
+rule copy_final_spatial:
+    input:
+        "pipeline_output/{sample}/spatial/tissue_positions_list.csv",
+    output:
+        directory("final_output/{sample}/spatial"),
+    shell:
+        """
+        mkdir -p final_output/{wildcards.sample}
+        cp -r pipeline_output/{wildcards.sample}/spatial {output}
         """
 
 rule copy_final_solo_out:
