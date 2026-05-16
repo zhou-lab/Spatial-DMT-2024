@@ -141,9 +141,11 @@ rule dna_trim_and_tag:
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
         wl = BARCODE_WHITELIST,
     output:
-        r1_out    = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
-        r2_out    = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
-        stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
+        r1_out         = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
+        r2_out         = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
+        unmatched_r1   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
+        unmatched_r2   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
+        stats          = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
         **_TRIM_LAMBDA_OUTS,
     resources:
         mem = "140G",
@@ -180,9 +182,14 @@ rule dna_trim_and_tag:
 
         ## Cat per-chunk gzipped outputs (gzip concat is valid; readers stream through)
         :> {output.r1_out}; :> {output.r2_out}
+        :> {output.unmatched_r1}; :> {output.unmatched_r2}
         for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
             cat "$f" >> {output.r1_out}
             cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
+        done
+        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Unmatched_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.unmatched_r1}
+            cat "${{f%_Unmatched_R1.fq.gz}}_Unmatched_R2.fq.gz" >> {output.unmatched_r2}
         done""" + _LAMBDA_CAT_BLOCK + """
 
         ## Sum per-chunk stats fieldwise
@@ -205,7 +212,6 @@ rule dna_biscuit_align:
         merged_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         dup_stats = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         align_txt = WORKDIR + "/{sample}/align_list.txt",
-        unmatched = WORKDIR + "/{sample}/bam/UNMATCHED.bam",
     resources:
         mem = "120G",
         time = "96:00:00",
@@ -231,16 +237,10 @@ rule dna_biscuit_align:
         samtools index {output.merged_bam}
         samtools flagstat {output.merged_bam} > {output.merged_flagstat}
 
-        ## Stream-split into per-cell BAMs (one BGZF write per cell, coord order preserved)
+        ## Stream-split into per-cell BAMs (one BGZF write per cell, coord order preserved).
+        ## Whitelist-miss reads went to the separate Unmatched fastqs and never entered this
+        ## merged BAM, so split produces only real per-cell BAMs (no UNMATCHED bucket here).
         {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
-
-        ## Backward-compat rename: the "0000" cell == reads whose barcode missed the whitelist
-        if [ -e {WORKDIR}/{wildcards.sample}/bam/0000.bam ]; then
-            mv {WORKDIR}/{wildcards.sample}/bam/0000.bam {output.unmatched}
-        else
-            ## downstream qc_biscuit expects this file; touch a header-only BAM
-            samtools view -H {output.merged_bam} | samtools view -b - > {output.unmatched}
-        fi
 
         ## align_list.txt: per-cell coord tags, used by qc_biscuit + pileup as a dependency signal
         find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
@@ -371,6 +371,39 @@ rule dna_biscuit_pileup_lambda:
             awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
                 -e '{{ M=round($7*$8); print M,$8-M;}}' | \
             yame pack -f 3 - > {output.cg}
+        """
+
+## Unmatched-track alignment: structure-pass + whitelist-miss reads from
+## dna_trim_and_tag. Aligned to the same genome but without -9 (no CB tag in
+## read names) and without -B (no per-cell dedup; position-based dedup is the
+## right level here -- every read is from the "fake" UNMATCHED cell anyway).
+## Output is a single sample-level BAM that qc_biscuit_unmatched can summarize.
+rule dna_biscuit_align_unmatched:
+    input:
+        r1 = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
+        r2 = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
+    output:
+        bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+        bai      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam.bai",
+        flagstat = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam.flagstat",
+        dup      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.dupsifter.stat",
+    resources:
+        mem = "120G",
+        time = "48:00:00",
+        cpus_per_task = 24,
+    params:
+        biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
+        ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+    shell:
+        """
+        set -xeo pipefail
+        mkdir -p {WORKDIR}/{wildcards.sample}/bam_unmatched/
+        biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} \
+            {input.r2} {input.r1} \
+        | {DUPSIFTER} --stats-output {output.dup} {params.ref_fasta} - \
+        | samtools sort -@ 8 -T {output.bam}_tmp -O bam -o {output.bam} -
+        samtools index {output.bam}
+        samtools flagstat {output.bam} > {output.flagstat}
         """
 
 ################################################################################
@@ -509,7 +542,6 @@ BISCUIT_BIN = config.get("BISCUIT_BIN",
 rule qc_biscuit:
     input:
         align_txt = WORKDIR + "/{sample}/align_list.txt",
-        unmatched = WORKDIR + "/{sample}/bam/UNMATCHED.bam",
         cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
     output:
         flag = WORKDIR + "/{sample}/qc/biscuit_qc/.done",
@@ -537,15 +569,60 @@ rule qc_biscuit:
                 {wildcards.sample}_{{}} \
                 {WORKDIR}/{wildcards.sample}/bam/{{}}.bam" \
             < {input.align_txt}
-        $QC -o {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/ \
-            --vcf {WORKDIR}/{wildcards.sample}/tmp/pileup/UNMATCHED.vcf.gz \
-            --cg-file {input.cg} \
-            --barcode UNMATCHED \
+        touch {output.flag}
+        """
+
+
+## Standard BISCUIT-QC on the unmatched (structure-fail + WL-miss) BAM as ONE
+## "sample" -- becomes one entry in MultiQC, parallel to (not mixed with) the
+## per-cell qc_biscuit entries. Sees the whole unmatched bucket lumped together.
+rule qc_biscuit_unmatched:
+    input:
+        bam = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+    output:
+        flag = WORKDIR + "/{sample}/qc/biscuit_qc_unmatched/.done",
+    resources:
+        mem = "16G",
+        time = "8:00:00",
+        cpus_per_task = 4,
+    params:
+        ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+        assets    = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_QCASSET"]),
+    shell:
+        """
+        set -xeo pipefail
+        export PATH={BISCUIT_BIN}:$PATH
+        mkdir -p {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_unmatched/
+
+        QC={workflow.basedir}/../tools/spatialmeth_qc.sh
+        $QC -o {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_unmatched/ \
             {params.assets} \
             {params.ref_fasta} \
             {wildcards.sample}_UNMATCHED \
-            {input.unmatched}
+            {input.bam}
         touch {output.flag}
+        """
+
+
+## Pulls the unmatched BAM apart by the _SF / _WM suffix in qname (added by
+## spatialmeth_trimtag.py) and reports per-category mapping/dup rates so you
+## can tell whether the unmatched bucket is dominated by structure-fail noise
+## or by near-whitelist barcode errors.
+rule dna_unmatched_diagnostics:
+    input:
+        bam = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+    output:
+        tsv = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
+    resources:
+        mem = "8G",
+        time = "4:00:00",
+        cpus_per_task = 2,
+    shell:
+        """
+        set -xeo pipefail
+        mkdir -p {WORKDIR}/{wildcards.sample}/qc/
+        {PYTHON} {workflow.basedir}/../tools/unmatched_diagnostics.py \
+            {input.bam} {output.tsv}
         """
 
 rule qc_biscuit_aggregate:

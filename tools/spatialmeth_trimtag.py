@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
-"""Trim adapters/linkers, assign spatial barcode, rewrite read names for
-biscuit -9 + dupsifter -B downstream.
+"""Trim adapters/linkers, assign spatial barcode, route reads by whitelist hit.
 
-Each passing read's name is rewritten as `<origid>_<CB>_<UMI>` where:
-  CB    is an 8-char ACGT encoding of the (X, Y) grid coord (4 nt per axis,
-        base-4 with A=0 C=1 G=2 T=3 MSB-first); all-N for whitelist misses.
-        ACGT-only is required by dupsifter -B; numerics would silently collapse
-        all bad-CB reads to the same dedup signature.
-  UMI   is the 1-bp R2 UMI for smcseq, or "N" placeholder for spatialdmt.
+For each structure-passing read, look up its 22-mer (smcseq) or 16-mer
+(spatialdmt) barcode in the whitelist (exact, or Hamming-1 with --bc-mismatch).
 
-biscuit align -9 parses these names as second-to-last=BC, last=UMI and emits
-proper CB:Z and RX:Z SAM tags; dupsifter -B then dedups per cell.
-split_bam_by_cb.py decodes the 8-char CB back to (X, Y) for per-cell BAM names.
+Whitelist HIT  -> <prefix>_R{1,2}.fq.gz with read name rewritten as
+                  `<origid>_<CB>_<UMI>` where:
+                    CB  = 8-char ACGT encoding of (X, Y) (see tools/cb_codec.py;
+                          ACGT-only is required by dupsifter -B).
+                    UMI = 1-bp R2 UMI for smcseq, "N" placeholder for spatialdmt.
+                  biscuit align -9 parses these names as second-to-last=BC,
+                  last=UMI, and emits CB:Z + RX:Z SAM tags. dupsifter -B
+                  dedups per cell on the CB tag. split_bam_by_cb.py decodes
+                  the CB back to "XXYY" for the per-cell BAM name.
+
+Whitelist MISS -> <prefix>_Unmatched_R{1,2}.fq.gz with the ORIGINAL read name
+                  (no CB tag). These reads went through structural parse (so
+                  primer/linker/Tn5 ME all matched) but the BC1+BC2 sequence
+                  isn't in the whitelist even within Hamming-1. They're aligned
+                  by dna_biscuit_align_unmatched and QC'd separately so the
+                  per-cell stats stay clean.
+
+Structure-FAIL reads (primer / linker / Tn5 ME not found) are dropped.
 
 Two protocols (--protocol):
   spatialdmt — 50x50 grid, 8+8 bp barcodes (default)
   smcseq     — 96x96 grid, 11+11 bp + GGTGTAGTGGGTTTGGAGG primer prefix
 
-Outputs (one pair per chunk; concatenate across chunks in the calling rule):
-  <prefix>_R1.fq.gz / <prefix>_R2.fq.gz       merged tagged fastqs
-  <prefix>_Lambda_R1.fq.gz / _R2.fq.gz        lambda spike-in (spatialdmt only;
-                                              smcseq produces empty files)
-  <prefix>_stats.txt                           read/whitelist counters
-  <prefix>_barcodes_all.txt                    observed-barcode frequency table
+Outputs (one set per chunk; concatenate across chunks in the calling rule):
+  <prefix>_R1.fq.gz / <prefix>_R2.fq.gz             matched, tagged fastqs
+  <prefix>_Unmatched_R1.fq.gz / _R2.fq.gz           structure-pass + WL-miss
+  <prefix>_Lambda_R1.fq.gz / _R2.fq.gz              spatialdmt only (smcseq skips)
+  <prefix>_stats.txt                                read/whitelist counters
+  <prefix>_barcodes_all.txt                         observed-barcode frequency
 """
 import argparse, gzip, os, subprocess, sys
 import regex as _regex
@@ -182,8 +192,15 @@ wl_map = load_whitelist_with_coords(args.whitelist, args.whitelist_col)
 if not wl_map:
     sys.exit(f"ERROR: empty whitelist from {args.whitelist} col {args.whitelist_col}")
 
+## MATCHED reads (whitelist hit, exact or Hamming-1) get a real CB tag and go
+## to <prefix>_R{1,2}.fq.gz for the per-cell pipeline. UNMATCHED reads
+## (structure-pass but whitelist-miss) go to <prefix>_Unmatched_R{1,2}.fq.gz
+## for a separate align + QC track -- avoids polluting per-cell stats with the
+## fake-cell UNMATCHED bucket and prevents dupsifter's all-N over-dedup.
 r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
 r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
+unmatched_r1_out = PigzWriter(args.output_prefix + "_Unmatched_R1.fq.gz")
+unmatched_r2_out = PigzWriter(args.output_prefix + "_Unmatched_R2.fq.gz")
 ## Lambda spike-in detection (barcode-85 motif) only fires for spatialdmt.
 ## smcseq has no dedicated lambda barcode -- skip creating the empty files.
 WRITE_LAMBDA = (args.protocol == "spatialdmt")
@@ -198,7 +215,16 @@ BARCODE85_MOTIF = "TTATTTTT"
 n_reads = n_pass = n_trim = n_trim_bases = 0
 n_reads_barcode85 = n_written_barcode85 = 0
 n_wl_exact = n_wl_hamming1 = n_wl_unmatched = 0
+n_unmatched_sf = n_unmatched_wm = 0
 barcode_cnt = {}
+
+
+def write_unmatched(rid_suffix, rid1, seq1, qual1, rid2, seq2, qual2):
+    """Send a read pair to the unmatched fastqs with a category suffix on the
+    read name. rid_suffix = 'SF' (structure-fail) or 'WM' (whitelist-miss).
+    The dna_unmatched_diagnostics rule parses the suffix back out."""
+    write_fastq_record(unmatched_r1_out, f"{rid1}_{rid_suffix}", seq1, qual1)
+    write_fastq_record(unmatched_r2_out, f"{rid2}_{rid_suffix}", seq2, qual2)
 
 with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq) as r2h:
     for (rid1_raw, r1seq, r1qual), (rid2_raw, r2seq, r2qual) in zip(iter_fastq(r1h), iter_fastq(r2h)):
@@ -221,10 +247,15 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
                 lambda_seq1 = lambda_seq1[:trim_i]
                 lambda_qual1 = lambda_qual1[:trim_i]
 
-        ## R2 demux: protocol-specific
+        ## R2 demux: protocol-specific. Structure-fail reads go to the Unmatched
+        ## fastq pair (with _SF suffix on read name) instead of being dropped --
+        ## the unmatched alignment + diagnostics rule then bucket on the suffix.
         if args.protocol == "smcseq":
             parsed = parse_r2_smcseq(r2seq)
             if parsed is None:
+                write_unmatched("SF", rid1_raw, lambda_seq1, lambda_qual1,
+                                      rid2_raw, r2seq, r2qual)
+                n_unmatched_sf += 1
                 continue
             b1s, l1s, b2s, l2s, umi_start, genomic_start = parsed
             umi_seq = r2seq[umi_start:genomic_start]
@@ -246,6 +277,9 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
             lk1 = find_near_matches(args.linker1, r2seq, max_l_dist=2)
             lk2 = find_near_matches(args.linker2, r2seq, max_l_dist=2)
             if not (len(lk1)==1 and len(lk2)==1 and len(te2)==1):
+                write_unmatched("SF", rid1_raw, lambda_seq1, lambda_qual1,
+                                      rid2_raw, r2seq, r2qual)
+                n_unmatched_sf += 1
                 continue
             l1s = lk1[0].start; l2s = lk2[0].start
             b1s = max(0, l1s - args.bc_side_len)
@@ -262,30 +296,42 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
 
         barcode_cnt[barcode] = barcode_cnt.get(barcode, 0) + 1
 
-        ## Whitelist lookup -> 8-char ACGT CB encoding (NNNNNNNN if unmatched)
-        cb_tag = UNMATCHED_CB
+        ## Whitelist lookup -> coord on hit. Unmatched reads route to a separate
+        ## fastq pair (no CB tag in name) for the dna_biscuit_align_unmatched
+        ## rule -- avoids putting fake-cell reads in the main per-cell pipeline.
+        coord = None
         if barcode in wl_map:
-            cb_tag = coord_to_acgt8(*wl_map[barcode])
+            coord = wl_map[barcode]
             n_wl_exact += 1
         elif args.bc_mismatch >= 1:
-            matched, coord = assign_barcode_hamming1(barcode, wl_map, args.bc_ambig)
-            if matched is not None:
-                cb_tag = coord_to_acgt8(*coord)
+            m, c = assign_barcode_hamming1(barcode, wl_map, args.bc_ambig)
+            if m is not None:
+                coord = c
                 n_wl_hamming1 += 1
             else:
                 n_wl_unmatched += 1
         else:
             n_wl_unmatched += 1
 
-        rid1 = f"{rid1_raw}_{cb_tag}_{umi_seq}"
-        rid2 = f"{rid2_raw}_{cb_tag}_{umi_seq}"
-        write_fastq_record(r1_out, rid1, lambda_seq1, lambda_qual1)
-        write_fastq_record(r2_out, rid2, new_seq2, new_qual2)
-        n_pass += 1
+        if coord is not None:
+            cb_tag = coord_to_acgt8(*coord)
+            rid1 = f"{rid1_raw}_{cb_tag}_{umi_seq}"
+            rid2 = f"{rid2_raw}_{cb_tag}_{umi_seq}"
+            write_fastq_record(r1_out, rid1, lambda_seq1, lambda_qual1)
+            write_fastq_record(r2_out, rid2, new_seq2, new_qual2)
+            n_pass += 1
+        else:
+            ## structure-pass + whitelist-miss -> unmatched track with _WM suffix.
+            ## Keep the genomic-trim of R1 and R2; no CB tag.
+            write_unmatched("WM", rid1_raw, lambda_seq1, lambda_qual1,
+                                  rid2_raw, new_seq2, new_qual2)
+            n_unmatched_wm += 1
 
 
 r1_out.close()
 r2_out.close()
+unmatched_r1_out.close()
+unmatched_r2_out.close()
 if WRITE_LAMBDA:
     lambda_r1_out.close()
     lambda_r2_out.close()
@@ -300,6 +346,9 @@ with open(args.output_prefix + "_stats.txt", "w") as fs:
     fs.write(f"WL_exact\t{n_wl_exact}\n")
     fs.write(f"WL_hamming1\t{n_wl_hamming1}\n")
     fs.write(f"WL_unmatched\t{n_wl_unmatched}\n")
+    fs.write(f"Unmatched_SF\t{n_unmatched_sf}\n")
+    fs.write(f"Unmatched_WM\t{n_unmatched_wm}\n")
+    fs.write(f"Unmatched_written\t{n_unmatched_sf + n_unmatched_wm}\n")
 
 sorted_barcodes = sorted(barcode_cnt.items(), key=lambda x: x[1], reverse=True)
 with open(args.output_prefix + "_barcodes_all.txt", "w") as fbc:
