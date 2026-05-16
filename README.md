@@ -4,7 +4,7 @@ This repository contains the data preprocessing and QC pipeline, plus downstream
 
 To access the processed `.cg` files: https://huggingface.co/datasets/HBBWS/Spatial-DMT
 
-- **`final_output`** (default) — adapter trimming, spatial demultiplexing, bisulfite alignment, CpG methylation pileup, lambda spike-in processing, RNA alignment and gene matrix generation, QC reports, and collection of final deliverables under `final_output/`
+- **`final_output`** (default) — adapter+structural-prefix trim with CB-tagged read names, single-pass bisulfite alignment with cell-aware dedup (dupsifter `-B`), per-cell BAM split, CpG methylation pileup, lambda spike-in alignment, RNA alignment and gene matrix generation, QC reports, and collection of final deliverables under `final_output/`
 - **`qc`** — BISCUIT QC tables, spatial heatmaps, MultiQC report, self-contained HTML report, and per-feature mean methylation summaries
 - **`allc`** — all-cytosine pileup and non-CpG feature methylation summaries (run before `clean`)
 - **`clean`** — remove intermediate VCF/cg files and spatial plot PNGs
@@ -32,6 +32,10 @@ conda install -c conda-forge -c bioconda \
     multiqc \
     r-base \
     r-seurat \
+    biopython \
+    fuzzysearch \
+    regex \
+    pysam \
     matplotlib \
     pandas
 ```
@@ -69,6 +73,9 @@ brew install bbtools   # tested: 39.81b
 | [Seurat](https://satijalab.org/seurat/) | 5.x | conda-forge |
 | [Python](https://www.python.org/) | 3.x | conda-forge |
 | [Biopython](https://biopython.org/) | — | conda-forge |
+| [fuzzysearch](https://github.com/taleinat/fuzzysearch) | — | conda-forge (used by `spatialmeth_trimtag.py` for R1 adapter scan) |
+| [regex](https://pypi.org/project/regex/) | — | conda-forge (smcseq fuzzy linker patterns) |
+| [pysam](https://github.com/pysam-developers/pysam) | — | conda-forge (used by `split_bam_by_cb.py` and `barcode_summary.py`) |
 | matplotlib | — | conda-forge |
 | pandas | — | conda-forge |
 
@@ -139,9 +146,11 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 | Key | Default | Description |
 |-----|---------|-------------|
 | `FASTQ_DIR` | `fastq` | Root containing `{sample}/{DNA,RNA}_{1,2}.fq.gz`. Accepts absolute paths. |
-| `WORKDIR` | `pipeline_output` | Intermediate outputs (per-barcode BAMs, VCFs, qc/). Accepts absolute paths. |
+| `WORKDIR` | `pipeline_output` | Intermediate outputs (merged tagged FASTQs, merged BAM, per-cell BAMs, VCFs, qc/). Accepts absolute paths. |
 | `OUTDIR` | `final_output` | Per-sample deliverable bundle (`.cg`, qc reports, gene matrix). Accepts absolute paths. |
 | `protocol` | `spatialdmt` | R2 chemistry: `spatialdmt` (50×50 grid, 8+8 bp barcodes) or `smcseq` (96×96 grid, 11+11 bp barcodes). See [R2 chemistry](#r2-chemistry-protocol-switch) for grammar details. |
+| `DUPSIFTER` | `~/software/dupsifter/v1.3.0/bin/dupsifter` | Path to a dupsifter ≥ 1.3.0 binary (the `-B` barcode-aware dedup flag was added in 1.3.0). |
+| `BISCUIT_BIN` | `/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/envs/biscuit/bin` | Directory prepended to PATH inside `qc_biscuit` so `biscuit qc` resolves to ≥ 1.8. |
 
 Example with absolute paths (keeps intermediates and deliverables on separate disks):
 ```bash
@@ -199,13 +208,15 @@ Switch with `--config protocol=smcseq`.
 
 #### Pipeline steps
 
+**Architecture note**: demux-after-align. The trim step assigns each read a spatial-coordinate CB tag (encoded as an 8-char ACGT string for dupsifter compatibility; see `tools/cb_codec.py`) and emits one merged tagged FASTQ pair per sample. Alignment runs once over the whole sample, dupsifter `-B` dedups per-cell on the merged BAM, then the BAM is split into per-cell shards for pileup. Replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawned ~9216 BISCUIT invocations per sample.
+
 **DNA methylation branch:**
 
-1. `dna_trim_and_demux` — Trim adapters and demultiplex reads by spatial barcode; outputs per-barcode FASTQ pairs, merged trimmed FASTQs, and lambda spike-in FASTQs
-2. `dna_biscuit_align` — Bisulfite-aware alignment of each barcode's reads to the genome with BISCUIT, duplicate marking with dupsifter, BAM sort and index
-3. `dna_biscuit_pileup` — CpG methylation pileup per barcode BAM, VCF→BED conversion, strand merging, CpG BED intersection, and packing into a yame `.cg` file indexed by barcode
-4. `dna_biscuit_align_lambda` — Align lambda spike-in reads to the lambda genome for bisulfite conversion efficiency estimation
-5. `dna_biscuit_pileup_lambda` — Pileup on lambda BAM; produces allc.bed for conversion efficiency calculation
+1. `dna_trim_and_tag` — Adapter trim (R1) + structural-prefix parse (R2: primer + BC1 + linker + BC2 + linker + Tn5 ME [+ UMI for smcseq]). Look up BC1+BC2 in the whitelist (Hamming-1 tolerated), encode the matched (X, Y) coord as an 8-char ACGT string, rewrite each read name as `<origid>_<CB>_<UMI>`. Emit one merged R1/R2 tagged FASTQ pair per sample (`tools/spatialmeth_trimtag.py`; chunked-parallel via GNU parallel, pigz output).
+2. `dna_biscuit_align` — One `biscuit align -9` over the merged tagged FASTQ pair → `dupsifter -B` (cell-aware, BS-correct dedup via the CB tag) → `samtools sort` → per-cell BAM split keyed on CB (`tools/split_bam_by_cb.py` decodes ACGT back to "XXYY"). Outputs `bam_merged/{sample}_merged_dedup.bam` and `bam/<XXYY>.bam` per cell, plus `bam/UNMATCHED.bam` for reads whose barcode missed the whitelist.
+3. `dna_biscuit_pileup` — CpG methylation pileup per per-cell BAM (parallel via GNU parallel), VCF→BED conversion, strand merging, CpG BED intersection, packing into a yame `.cg` file indexed by cell coord.
+4. `dna_biscuit_align_lambda` — Align reads to the lambda genome for bisulfite conversion efficiency estimation. **Inputs differ by protocol**: `spatialdmt` uses the dedicated `trim/{sample}_Lambda_R{1,2}.fq.gz` files emitted by the trim step (barcode-85 reads only); `smcseq` aligns the FULL merged tagged FASTQ pair to lambda since there's no dedicated lambda barcode in that protocol.
+5. `dna_biscuit_pileup_lambda` — Pileup on lambda BAM; produces allc.bed for conversion efficiency calculation.
 
 **RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
 
@@ -219,15 +230,16 @@ Switch with `--config protocol=smcseq`.
 
 ```
 pipeline_output/{sample}/
-  trim/              # merged trimmed DNA FASTQs (non-lambda and lambda)
-  dmux/              # per-barcode demuxed DNA FASTQ pairs (.fq.gz)
-  bam/               # per-barcode BAMs with index and dupsifter stats
+  trim/              # merged tagged DNA FASTQs (R1/R2); Lambda_R{1,2} only for spatialdmt
+  bam_merged/        # one big {sample}_merged_dedup.bam (post-align + dupsifter)
+  bam/               # per-cell BAMs named <XXYY>.bam (from split_bam_by_cb.py) + UNMATCHED.bam
   bam_lambda/        # lambda BAM with flagstat and dupsifter stats
-  pileup/            # {sample}.cg and {sample}.cg.idx (yame packed CpG methylation)
-  pileup_lambda/     # lambda VCF, allc.bed, and cg.bed
-  tmp/               # all intermediates removed by clean: pileup VCFs, per-barcode .cg files, filtered FASTQs
-  rna_bbduk/         # bbduk filter stats per step
-  rna_STAR/          # Aligned.out.sam, STAR logs, Solo.out/ (count matrix)
+  pileup/            # {sample}.cg and {sample}.cg.idx (yame packed CpG methylation indexed by cell)
+  align_list.txt     # list of per-cell coord tags (XXYY) that have BAMs; consumed by pileup + QC
+  tmp/               # all intermediates removed by clean: per-chunk trim outputs, pileup VCFs,
+                     #   per-cell .cg shards, filtered RNA FASTQs, lambda pileup intermediates
+  rna_bbduk/         # bbduk filter stats per step (RNA samples only)
+  rna_STAR/          # Aligned.out.sam, STAR logs, Solo.out/ (count matrix; RNA samples only)
 ```
 
 The `final_output` target copies the primary deliverables into one sample-organized directory:
@@ -257,32 +269,32 @@ snakemake --profile "$REPO/profiles/local_HPC" \
 
 **QC steps:**
 
-- `dna_biscuit_qc` — Run `QC.sh` (BISCUIT QC pipeline) on every per-barcode BAM; tables aggregated by MultiQC
-- `qc_barcode_counts` — Per-barcode DNA read counts, mapping rate, and duplication rate
-- `qc_spatial_match` — Map barcode counts to (x, y) spatial grid coordinates
-- `qc_spatial_plots` — Spatial heatmaps of read depth, mapping rate, and duplication rate
-- `qc_multiqc` — MultiQC report aggregating BISCUIT QC tables, STAR logs, and bbduk stats
-- `qc_html_report` — Self-contained HTML report with embedded spatial plots
-- `feature_mean` — Per-barcode mean methylation summarized over genomic features (ChromHMM, windows, chromosomes)
+- `qc_biscuit` — Run `tools/spatialmeth_qc.sh` (our vendored BISCUIT-QC variant; calls `biscuit qc` + uses the merged yame `.cg` for per-cell coverage shortcut, avoiding per-cell bedtools genomecov) on every per-cell BAM (24-way `parallel`). Biscuit ≥ 1.8 pinned via the `BISCUIT_BIN` config key.
+- `qc_biscuit_aggregate` — Merge per-cell BISCUIT-QC tables into sample-level summaries (`tools/aggregate_biscuit_qc.py`).
+- `qc_barcode_summary` — Single pysam pass over `bam_merged/{sample}_merged_dedup.bam` to aggregate per-CB (total, mapped, dup) counts, decode CB → (X, Y) via `cb_codec`, emit per-cell TSV and four spatial heatmaps + barcode-rank plot. Grid auto-derived from whitelist.
+- `qc_report` — MultiQC report aggregating BISCUIT-QC tables, STAR logs, and bbduk stats, plus a self-contained HTML report with embedded spatial plots.
+- `feature_mean` — Per-cell mean methylation summarized over genomic features (ChromHMM, windows, chromosomes).
+- `qc` — umbrella target that runs the four QC rules above.
 
 #### QC outputs
 
 ```
 pipeline_output/{sample}/qc/
-  biscuit_qc/        # per-barcode BISCUIT QC tables (input to MultiQC)
-  features/          # per-feature mean methylation tables (.txt.gz per feature set)
+  biscuit_qc/                # per-cell BISCUIT-QC tables (input to MultiQC)
+  biscuit_qc_merged/         # sample-level BISCUIT-QC summaries from aggregate
+  features/                  # per-feature mean methylation tables (.txt.gz per feature set)
   table/
-    {sample}_barcode_counts.tsv          # per-barcode DNA reads, mapping rate, dup rate
-    {sample}_spatial_barcode_counts.tsv  # counts mapped to (x, y) spatial grid
-    {sample}_barcodes_bool_index.tsv     # all observed barcodes with spatial flag
+    {sample}_spatial_barcode_counts.tsv  # per-cell counts (cb, x, y, dna_reads, mapped, dup);
+                                         #   last row is the all-N UNMATCHED bucket
   plots/
-    spatial_dna_reads.png                # read depth heatmap
-    spatial_log_dna_reads.png            # log10 read depth heatmap
-    spatial_mapping_rate.png             # per-barcode mapping rate
-    spatial_dup_rate.png                 # per-barcode duplication rate
-    barcode_rank.png                     # barcode rank vs count
-  multiqc_report.html                    # MultiQC report (BISCUIT + STAR + bbduk)
-  qc_report.html                         # self-contained HTML with embedded spatial maps
+    spatial_dna_reads.png                # read-count heatmap (linear)
+    spatial_log_dna_reads.png            # read-count heatmap (log10)
+    spatial_mapping_rate.png             # per-cell mapping rate
+    spatial_dup_rate.png                 # per-cell duplication rate
+    barcode_rank.png                     # barcode rank vs read count
+  html/
+    multiqc_report.html                  # MultiQC report (BISCUIT + STAR + bbduk)
+    qc_report.html                       # self-contained HTML with embedded spatial maps
 ```
 
 ### 3. AllC (non-CpG methylation)
@@ -319,7 +331,7 @@ snakemake --profile "$REPO/profiles/local_HPC" \
 ```
 
 #### - For Image processing:
-This python script processes a phase contrast tissue image to generate spatial metadata similar to 10x Visium outputs. It first converts the image to grayscale and applies adaptive thresholding to create a binary mask that distinguishes tissue from background. The image is then divided into a fixed 50×50 grid, and each grid cell is evaluated to determine whether it contains tissue based on a pixel intensity threshold. Detected tissue spots are matched with predefined spatial barcodes, and the results are compiled into output files, including a tissue positions CSV, a scale factors JSON, and a visualization image with highlighted tissue regions.
+This python script processes a phase contrast tissue image to generate spatial metadata similar to 10x Visium outputs. It first converts the image to grayscale and applies adaptive thresholding to create a binary mask that distinguishes tissue from background. The image is then divided into a grid matching the protocol (50×50 for `spatialdmt`, 96×96 for `smcseq`), and each grid cell is evaluated to determine whether it contains tissue based on a pixel intensity threshold. Detected tissue spots are matched with predefined spatial barcodes, and the results are compiled into output files, including a tissue positions CSV, a scale factors JSON, and a visualization image with highlighted tissue regions.
 
 ### 2. Downstream data analysis and visualization 
 
