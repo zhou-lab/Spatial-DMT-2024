@@ -6,5 +6,5 @@ printshellcmds: True
 latency-wait: 100
 rerun-triggers:
   - mtime
-configfile:
-  - profiles/local_HPC/site.yaml
+## Scalar form (not list) -- profile-dir-relative resolution. See slurm/config.yaml.
+configfile: site.yaml

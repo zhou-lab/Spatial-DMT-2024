@@ -95,6 +95,8 @@ Samples are auto-detected from `fastq/*/DNA_1.fq*`, or specified explicitly with
 
 #### Running the pipeline
 
+All invocations use **absolute** paths for `--profile` and `--snakefile` so the command works from any cwd (your scratch workdir, your home, anywhere). `site.yaml` is loaded automatically via each profile's `configfile:` directive (scalar form → profile-relative path resolution).
+
 **Local / HPC (no scheduler):**
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024

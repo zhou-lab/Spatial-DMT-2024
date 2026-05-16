@@ -13,8 +13,11 @@ default-resources:
   - mem="10G"
   - cpus_per_task=1
 
-configfile:
-  - profiles/slurm/site.yaml
+## SCALAR form (not list) is required for profile-relative path resolution.
+## With `configfile: site.yaml` snakemake 9 resolves it relative to this
+## profile directory; with the list form (`configfile:\n  - site.yaml`) it
+## resolves relative to cwd, breaking cwd-independent invocations.
+configfile: site.yaml
 
 jobs: 100
 printshellcmds: True
