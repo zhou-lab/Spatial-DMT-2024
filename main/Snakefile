@@ -204,7 +204,7 @@ rule dna_biscuit_align:
         merged_bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.bai",
         merged_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         dup_stats = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
-        align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
+        align_txt = WORKDIR + "/{sample}/align_list.txt",
         unmatched = WORKDIR + "/{sample}/bam/UNMATCHED.bam",
     resources:
         mem = "120G",
@@ -218,8 +218,7 @@ rule dna_biscuit_align:
         set -xeo pipefail
         ulimit -n 65535
         mkdir -p {WORKDIR}/{wildcards.sample}/bam/ \
-                 {WORKDIR}/{wildcards.sample}/bam_merged/ \
-                 {WORKDIR}/{wildcards.sample}/dmux/
+                 {WORKDIR}/{wildcards.sample}/bam_merged/
 
         ## biscuit -9 parses <origid>_<CB>_<UMI> -> emits CB:Z + RX:Z tags (CB is
         ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimadapters.py).
@@ -252,7 +251,7 @@ rule dna_biscuit_align:
 # merge strands, intersect with reference CpG BED, and pack into yame .cg format.
 rule dna_biscuit_pileup:
     input:
-        align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
+        align_txt = WORKDIR + "/{sample}/align_list.txt",
     output:
         cg  = WORKDIR + "/{sample}/pileup/{sample}.cg",
         idx = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
@@ -509,7 +508,7 @@ BISCUIT_BIN = config.get("BISCUIT_BIN",
 
 rule qc_biscuit:
     input:
-        align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
+        align_txt = WORKDIR + "/{sample}/align_list.txt",
         unmatched = WORKDIR + "/{sample}/bam/UNMATCHED.bam",
         cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
     output:
@@ -553,7 +552,7 @@ rule qc_biscuit_aggregate:
     input:
         flag          = WORKDIR + "/{sample}/qc/biscuit_qc/.done",
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
-        align_txt     = WORKDIR + "/{sample}/dmux/align_list.txt",
+        align_txt     = WORKDIR + "/{sample}/align_list.txt",
     output:
         flag = WORKDIR + "/{sample}/qc/biscuit_qc_merged/.done",
     resources:
