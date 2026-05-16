@@ -3,7 +3,7 @@
 
 Input BAM is expected to carry CB:Z:<8-char ACGT> on every alignment (set by
 biscuit align -9 from the <origid>_<CB>_<UMI> read-name convention written by
-spatialmeth_trimadapters.py). The 8-char CB is decoded back to (X, Y) using
+spatialmeth_trimtag.py). The 8-char CB is decoded back to (X, Y) using
 4-nt-per-axis base-4 (A=0 C=1 G=2 T=3), and the per-cell BAM is named
 <out_dir>/<XXYY>.bam (zero-padded). The all-N sentinel goes to UNMATCHED.bam.
 

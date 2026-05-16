@@ -119,8 +119,8 @@ DUPSIFTER = config.get("DUPSIFTER", "/home/zhouw3/software/dupsifter/v1.3.0/bin/
 SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
 
 ## Lambda fastq outputs only exist for spatialdmt -- smcseq has no dedicated
-## lambda barcode, so trimadapters.py doesn't write per-chunk Lambda fastqs
-## and the cat block is skipped (see _LAMBDA_CAT_BLOCK below).
+## lambda barcode, so spatialmeth_trimtag.py doesn't write per-chunk Lambda
+## fastqs and the cat block is skipped (see _LAMBDA_CAT_BLOCK below).
 _TRIM_LAMBDA_OUTS = {}
 _LAMBDA_CAT_BLOCK = ""
 if PROTOCOL == "spatialdmt":
@@ -166,7 +166,7 @@ rule dna_trim_and_tag:
         parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
             f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
             d=$(dirname "$f"); f2="$d/_chunk_2$cid"
-            {PYTHON} {workflow.basedir}/../tools/spatialmeth_trimadapters.py \
+            {PYTHON} {workflow.basedir}/../tools/spatialmeth_trimtag.py \
                 "$f" "$f2" \
                 -o {WORKDIR}/{wildcards.sample}/tmp/trim/_out_"$cid" \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
@@ -221,7 +221,7 @@ rule dna_biscuit_align:
                  {WORKDIR}/{wildcards.sample}/bam_merged/
 
         ## biscuit -9 parses <origid>_<CB>_<UMI> -> emits CB:Z + RX:Z tags (CB is
-        ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimadapters.py).
+        ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimtag.py).
         ## dupsifter -B uses CB tag for per-cell dedup signature (BS-correct + cell-aware).
         ## PE mode (no -s) because both R1 and R2 are genomic after the barcode/UMI strip.
         biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} \
