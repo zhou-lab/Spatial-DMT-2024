@@ -91,7 +91,21 @@ rule final_output:
 # DNA Pipeline Rules
 ################################################################################
 
-rule dna_trim_and_demux:
+## Demux-after-align architecture (smcseq + spatialdmt):
+##   1. dna_trim_and_tag: rewrite each read name as <origid>_<XXYY>_<UMI>;
+##      emit a single tagged R1/R2 pair per sample (no per-cell shards).
+##   2. dna_biscuit_align: one biscuit align -9 → dupsifter -B (cell-aware,
+##      BS-correct) → samtools sort → split BAM by CB:Z tag into bam/XXYY.bam
+##      (the 0000 cell holds reads whose barcode missed the whitelist; renamed
+##      to bam/UNMATCHED.bam for back-compat with downstream QC rules).
+##   3. dna_biscuit_pileup: per-cell pileup over bam/*.bam (unchanged).
+##
+## Replaces the original demux-before-align path which spawned ~9216 biscuit
+## invocations per sample.
+DUPSIFTER = config.get("DUPSIFTER", "/home/zhouw3/software/dupsifter/v1.3.0/bin/dupsifter")
+SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
+
+rule dna_trim_and_tag:
     input:
         r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
@@ -101,9 +115,6 @@ rule dna_trim_and_demux:
         r2_out    = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
         lambda_r1 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
         lambda_r2 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
-        unmatched_r1 = WORKDIR + "/{sample}/dmux/UNMATCHED_R1.fq.gz",
-        unmatched_r2 = WORKDIR + "/{sample}/dmux/UNMATCHED_R2.fq.gz",
-        dmux_done = WORKDIR + "/{sample}/dmux/_merged_done.flag",
         stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
     resources:
         mem = "140G",
@@ -111,12 +122,9 @@ rule dna_trim_and_demux:
         cpus_per_task = 24,
     shell:
         """
-        ulimit -n 65535
         set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/trim/ \
-                 {WORKDIR}/{wildcards.sample}/dmux/ \
-                 {WORKDIR}/{wildcards.sample}/tmp/trim/ \
-                 {WORKDIR}/{wildcards.sample}/tmp/dmux/
+                 {WORKDIR}/{wildcards.sample}/tmp/trim/
 
         CAT_CMD1="cat"
         if [[ {input.r1} == *.gz ]]; then CAT_CMD1="pigz -dc"; fi
@@ -138,17 +146,12 @@ rule dna_trim_and_demux:
                 --protocol {PROTOCOL} \
                 --whitelist {input.wl} \
                 --whitelist_col {BARCODE_WL_COL} \
-                --dmux_dir {WORKDIR}/{wildcards.sample}/tmp/dmux \
-                --chunk_id "$cid" \
                 --bc-mismatch 1
         ' ::: {WORKDIR}/{wildcards.sample}/tmp/trim/_chunk_1*
 
-        # Concatenate per-chunk trimmed outputs into final merged fastqs
-        :> {output.r1_out}
-        :> {output.r2_out}
-        :> {output.lambda_r1}
-        :> {output.lambda_r2}
-
+        ## Cat per-chunk gzipped outputs (gzip concat is valid; readers stream through)
+        :> {output.r1_out}; :> {output.r2_out}
+        :> {output.lambda_r1}; :> {output.lambda_r2}
         for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
             cat "$f" >> {output.r1_out}
             cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
@@ -158,31 +161,25 @@ rule dna_trim_and_demux:
             cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
         done
 
-        # Merge per-chunk per-barcode demux fastqs into one file per barcode (including UNMATCHED)
-        # Use find instead of ls glob to avoid "Argument list too long" with 60k+ chunk files
-        find {WORKDIR}/{wildcards.sample}/tmp/dmux -maxdepth 1 -name '*_R1.*.fq' -printf '%f\n' 2>/dev/null | \
-            sed 's|_R1[.][^.]*[.]fq||' | sort -u | while read bc; do
-            cat {WORKDIR}/{wildcards.sample}/tmp/dmux/"${{bc}}"_R1.*.fq > {WORKDIR}/{wildcards.sample}/dmux/"${{bc}}"_R1.fq || true
-            cat {WORKDIR}/{wildcards.sample}/tmp/dmux/"${{bc}}"_R2.*.fq > {WORKDIR}/{wildcards.sample}/dmux/"${{bc}}"_R2.fq || true
-        done
-        find {WORKDIR}/{wildcards.sample}/dmux -maxdepth 1 -name '*.fq' | \
-            parallel -j {resources.cpus_per_task} 'gzip -f {{}}'
-
-        # Merge per-chunk stats by summing each field
+        ## Sum per-chunk stats fieldwise
         awk '{{cnt[$1]+=$2}} END {{
             for (k in cnt) print k"\t"cnt[k]
         }}' {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt \
             | sort -k1,1 > {output.stats}
-
-        touch {output.dmux_done}
         """
 
-# Align each per-barcode demuxed FASTQ pair to the genome with biscuit (bisulfite-aware),
-# mark duplicates with dupsifter, sort and index BAM; emit a list of processed barcodes.
+## One biscuit align call (with -9 to parse <origid>_<XXYY>_<UMI> into CB:Z+RX:Z),
+## piped through tag-aware dupsifter -B, sorted by coord, then split into per-cell
+## BAMs keyed on CB:Z. Replaces the 9216-cell-per-sample alignment loop.
 rule dna_biscuit_align:
     input:
-        dmux_done = WORKDIR + "/{sample}/dmux/_merged_done.flag",
+        r1 = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
+        r2 = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
     output:
+        merged_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
+        merged_bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.bai",
+        merged_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
+        dup_stats = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
         unmatched = WORKDIR + "/{sample}/bam/UNMATCHED.bam",
     resources:
@@ -194,24 +191,37 @@ rule dna_biscuit_align:
         ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
     shell:
         """
-        set -xe
-        mkdir -p {WORKDIR}/{wildcards.sample}/bam/
-        :>{output.align_txt}
-        for fq1 in {WORKDIR}/{wildcards.sample}/dmux/*_R1.fq.gz; do
-            barcode=$(basename $fq1 _R1.fq.gz)
-            out_dup={WORKDIR}/{wildcards.sample}/bam/${{barcode}}.dupsifter.stat
-            out_bam={WORKDIR}/{wildcards.sample}/bam/${{barcode}}.bam
-            biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} \
-                {WORKDIR}/{wildcards.sample}/dmux/${{barcode}}_R2.fq.gz $fq1 | \
-                dupsifter --stats-output $out_dup {params.ref_fasta} | \
-                samtools sort -T ${{out_bam}}_tmp -O bam -o $out_bam
-            samtools index $out_bam
-            samtools flagstat $out_bam > ${{out_bam}}.flagstat
-            if [ "$barcode" != "UNMATCHED" ]; then
-                echo "$barcode" >> {output.align_txt}
-            fi
-            done
+        set -xeo pipefail
+        ulimit -n 65535
+        mkdir -p {WORKDIR}/{wildcards.sample}/bam/ \
+                 {WORKDIR}/{wildcards.sample}/bam_merged/ \
+                 {WORKDIR}/{wildcards.sample}/dmux/
 
+        ## biscuit -9 parses <origid>_<CB>_<UMI> -> emits CB:Z + RX:Z tags (CB is
+        ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimadapters.py).
+        ## dupsifter -B uses CB tag for per-cell dedup signature (BS-correct + cell-aware).
+        ## PE mode (no -s) because both R1 and R2 are genomic after the barcode/UMI strip.
+        biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} \
+            {input.r2} {input.r1} \
+        | {DUPSIFTER} -B --stats-output {output.dup_stats} {params.ref_fasta} - \
+        | samtools sort -@ 8 -T {output.merged_bam}_tmp -O bam -o {output.merged_bam} -
+        samtools index {output.merged_bam}
+        samtools flagstat {output.merged_bam} > {output.merged_flagstat}
+
+        ## Stream-split into per-cell BAMs (one BGZF write per cell, coord order preserved)
+        {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
+
+        ## Backward-compat rename: the "0000" cell == reads whose barcode missed the whitelist
+        if [ -e {WORKDIR}/{wildcards.sample}/bam/0000.bam ]; then
+            mv {WORKDIR}/{wildcards.sample}/bam/0000.bam {output.unmatched}
+        else
+            ## downstream qc_biscuit expects this file; touch a header-only BAM
+            samtools view -H {output.merged_bam} | samtools view -b - > {output.unmatched}
+        fi
+
+        ## align_list.txt: per-cell coord tags, used by qc_biscuit + pileup as a dependency signal
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
+            -printf '%f\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
         """
 
 # CpG methylation pileup: call methylation per barcode BAM, convert VCF to CpG BED,
@@ -526,11 +536,14 @@ else:
     FEATS = ["ChromHMM.20220414", "Win100k.20220228", "Win1m.20230709", "Chromosome.20221129"]
 
 # Per-barcode read counts, spatial mapping, and QC heatmap plots
+## TODO(smcseq): barcode_summary.py was wired to the old dmux/ per-cell fastqs.
+## After demux-after-align, it should read per-cell read counts directly from
+## bam/*.bam (or the trim/_barcodes_all.txt frequency table). Not updated in
+## this rewrite — qc_report depends on this so qc/html will fail until fixed.
 rule qc_barcode_summary:
     input:
-        dmux_done = WORKDIR + "/{sample}/dmux/_merged_done.flag",
         align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
-        whitelist = os.path.join(BARCODES_DIR, "spatial_barcodes.txt"),
+        whitelist = BARCODE_WHITELIST,
     output:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
