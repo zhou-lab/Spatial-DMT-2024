@@ -51,8 +51,8 @@ REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 
-## R2 chemistry: spatialdmt (Fan-lab 50x50, 8+8bp barcodes — default)
-##           or smcseq (Liu-lab 96x96, 11+11bp + GGTGTAGTGGGTTTGGAGG primer)
+## R2 chemistry: spatialdmt (50x50, 8+8bp barcodes — default)
+##           or smcseq (96x96, 11+11bp + GGTGTAGTGGGTTTGGAGG primer)
 PROTOCOL = config.get("protocol", "spatialdmt")
 if PROTOCOL == "smcseq":
     BARCODE_WHITELIST = os.path.join(BARCODES_DIR, "smcseq_barcodes_22mer.txt")
@@ -62,6 +62,19 @@ elif PROTOCOL == "spatialdmt":
     BARCODE_WL_COL    = 4
 else:
     raise ValueError(f"Unknown protocol '{PROTOCOL}'. Expected spatialdmt or smcseq.")
+
+def _grid_dims(path):
+    """Derive (max X, max Y) from whitelist cols 2 and 3 (1-indexed)."""
+    mx = my = 0
+    with open(path) as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+                mx = max(mx, int(parts[1]))
+                my = max(my, int(parts[2]))
+    return mx, my
+
+GRID_X, GRID_Y = _grid_dims(BARCODE_WHITELIST)
 
 # Resolve input fastq path, supporting .fq/.fastq with or without .gz
 def get_fastq(wildcards, prefix):
@@ -536,14 +549,11 @@ else:
     FEATS = ["ChromHMM.20220414", "Win100k.20220228", "Win1m.20230709", "Chromosome.20221129"]
 
 # Per-barcode read counts, spatial mapping, and QC heatmap plots
-## TODO(smcseq): barcode_summary.py was wired to the old dmux/ per-cell fastqs.
-## After demux-after-align, it should read per-cell read counts directly from
-## bam/*.bam (or the trim/_barcodes_all.txt frequency table). Not updated in
-## this rewrite — qc_report depends on this so qc/html will fail until fixed.
+## Per-cell read counts + spatial heatmaps from the merged deduped BAM (one
+## pysam pass; aggregates per CB:Z tag, decodes back to (X, Y) via cb_codec).
 rule qc_barcode_summary:
     input:
-        align_txt = WORKDIR + "/{sample}/dmux/align_list.txt",
-        whitelist = BARCODE_WHITELIST,
+        merged_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
     output:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
@@ -553,12 +563,12 @@ rule qc_barcode_summary:
     shell:
         """
         {PYTHON} {workflow.basedir}/../tools/barcode_summary.py \
-            --dmux-dir   {WORKDIR}/{wildcards.sample}/dmux/ \
-            --bam-dir    {WORKDIR}/{wildcards.sample}/bam/ \
-            --whitelist  {input.whitelist} \
+            --merged-bam {input.merged_bam} \
             --sample     {wildcards.sample} \
             --table-dir  {WORKDIR}/{wildcards.sample}/qc/table/ \
-            --plots-dir  {WORKDIR}/{wildcards.sample}/qc/plots/
+            --plots-dir  {WORKDIR}/{wildcards.sample}/qc/plots/ \
+            --grid-x     {GRID_X} \
+            --grid-y     {GRID_Y}
         touch {output.plots_done}
         """
 

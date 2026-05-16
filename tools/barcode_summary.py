@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""
-Count reads per barcode from demuxed FASTQs and dupsifter stats, map to
-spatial (x, y) positions using the spatial whitelist, and generate QC plots.
+"""Per-cell read counts (total / mapped / dup) from the merged deduped BAM,
+mapped onto the (X, Y) spatial grid and rendered as heatmaps + a barcode-rank
+plot.
 
-Whitelist format (tab-separated, no header):
-  col0: barcode_A  col1: x  col2: y  col3: barcode (demux sequence)
+Inputs: one merged coord-sorted BAM produced by `dna_biscuit_align`. Every
+alignment carries CB:Z:<8-char ACGT> set by biscuit -9 from the
+<origid>_<CB>_<UMI> read-name convention. We iterate the merged BAM once,
+aggregate per-CB counts, and decode CB back to (X, Y) via cb_codec.
 
 Outputs:
-  {table_dir}/{sample}_spatial_barcode_counts.tsv
-  {plots_dir}/spatial_{metric}.png  (dna_reads, log_dna_reads, mapping_rate, dup_rate)
-  {plots_dir}/barcode_rank.png
+  {table_dir}/{sample}_spatial_barcode_counts.tsv     per-cell counts
+  {plots_dir}/spatial_{metric}.png                    heatmaps over the grid
+  {plots_dir}/barcode_rank.png                        rank vs read count
+
+Replaces the earlier per-cell-FASTQ + per-cell-dupsifter-stat path which is
+no longer produced after the demux-after-align rewrite.
 """
-import argparse
-import gzip
-import os
-import re
+import argparse, os, sys
+from collections import defaultdict
 
 import matplotlib
 matplotlib.use('Agg')
@@ -23,6 +26,9 @@ import matplotlib.image as mpimg
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import pandas as pd
+import pysam
+
+from cb_codec import coord_to_acgt8, UNMATCHED_CB
 
 
 BLUE_YELLOW = LinearSegmentedColormap.from_list('blue_yellow', ['#000033', '#2255aa', '#faf9cf'])
@@ -30,57 +36,55 @@ FIRE        = LinearSegmentedColormap.from_list('fire',        ['#220022', '#dd4
 RED_GRAY    = LinearSegmentedColormap.from_list('red_gray',    ['#e0e0e0', '#ee3322', '#880000'])
 
 
-def count_fastq_reads(fq_path):
-    opener = gzip.open if fq_path.endswith('.gz') else open
-    n = 0
-    with opener(fq_path, 'rt') as fh:
-        for _ in fh:
-            n += 1
-    return n // 4
+def aggregate_merged_bam(bam_path):
+    """One pass over the merged BAM; returns dict[cb_str] -> [total, mapped, dup].
+    Counts R1 only (one bucket per pair) so totals match per-pair semantics.
+    Skips secondary/supplementary alignments."""
+    counts = defaultdict(lambda: [0, 0, 0])
+    n_missing_cb = 0
+    bf = pysam.AlignmentFile(bam_path, "rb")
+    for read in bf:
+        if read.is_secondary or read.is_supplementary:
+            continue
+        if not read.is_read1:
+            continue
+        try:
+            cb = read.get_tag("CB")
+        except KeyError:
+            n_missing_cb += 1
+            continue
+        bucket = counts[cb]
+        bucket[0] += 1
+        if not read.is_unmapped:
+            bucket[1] += 1
+            if read.is_duplicate:
+                bucket[2] += 1
+    bf.close()
+    if n_missing_cb:
+        sys.stderr.write(f"WARN: {n_missing_cb} primary R1 reads had no CB tag\n")
+    return counts
 
 
-def parse_dupsifter(stat_path):
-    """Return (both_mapped_pairs, dup_pairs) from a dupsifter .stat file."""
-    both_mapped = dup = 0
-    with open(stat_path) as fh:
-        for line in fh:
-            m = re.search(r'number of reads with both reads mapped:\s+(\d+)', line)
-            if m:
-                both_mapped = int(m.group(1))
-            m = re.search(r'number of reads with both reads marked as duplicates:\s+(\d+)', line)
-            if m:
-                dup = int(m.group(1))
-    return both_mapped, dup
-
-
-def load_spatial_whitelist(path, barcode_col=3):
-    """Return list of (x, y, barcode); x=col1, y=col2 in whitelist."""
-    entries = []
-    with open(path) as fh:
-        for line in fh:
-            parts = line.rstrip('\n').split('\t')
-            if len(parts) > barcode_col:
-                entries.append((int(parts[1]), int(parts[2]), parts[barcode_col]))
-    return entries
-
-
-def plot_metric(df, col, title, cmap, output_path, img_path=None, vmin=None, vmax=None):
+def plot_metric(df, col, title, cmap, output_path, grid_x, grid_y,
+                img_path=None, vmin=None, vmax=None):
     fig, ax = plt.subplots(figsize=(7, 7))
     if img_path and os.path.exists(img_path):
         img = mpimg.imread(img_path)
-        ax.imshow(img, extent=[0.5, 50.5, 0.5, 50.5], aspect='auto')
+        ax.imshow(img, extent=[0.5, grid_x + 0.5, 0.5, grid_y + 0.5], aspect='auto')
     vals = df[col].values
     sc = ax.scatter(
-        df['x'], df['y'], c=vals, cmap=cmap, s=80, alpha=0.7,
+        df['x'], df['y'], c=vals, cmap=cmap,
+        s=max(10, 4000 / max(grid_x, grid_y)),
+        alpha=0.7,
         vmin=vmin if vmin is not None else np.nanpercentile(vals, 2),
         vmax=vmax if vmax is not None else np.nanpercentile(vals, 98),
     )
     plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
     ax.set_title(title, fontsize=12)
-    ax.set_xlabel('Lane (x)')
-    ax.set_ylabel('Position (y)')
-    ax.set_xlim(0.5, 50.5)
-    ax.set_ylim(50.5, 0.5)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_xlim(0.5, grid_x + 0.5)
+    ax.set_ylim(grid_y + 0.5, 0.5)
     ax.set_aspect('equal')
     ax.grid(False)
     fig.tight_layout()
@@ -89,16 +93,17 @@ def plot_metric(df, col, title, cmap, output_path, img_path=None, vmin=None, vma
     print(f'  {output_path}')
 
 
-def plot_barcode_rank(df, sample, output_path):
+def plot_barcode_rank(df, sample, output_path, grid_x, grid_y):
     counts = df['dna_reads'].sort_values(ascending=False).values
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.scatter(np.arange(1, len(counts) + 1), counts, s=5, alpha=0.6, c='steelblue')
-    ax.axvline(x=len(counts), color='k', linestyle='--', alpha=0.5,
-               label=f'{len(counts)} designed barcodes')
+    designed = grid_x * grid_y
+    ax.axvline(x=designed, color='k', linestyle='--', alpha=0.5,
+               label=f'{designed} designed barcodes ({grid_x}x{grid_y})')
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlabel('Barcode rank (log)')
-    ax.set_ylabel('DNA read count (log)')
+    ax.set_ylabel('DNA reads (log)')
     ax.set_title(f'{sample} — Barcode rank vs read count')
     ax.legend()
     ax.grid(True, which='both', alpha=0.3)
@@ -109,67 +114,66 @@ def plot_barcode_rank(df, sample, output_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Per-barcode read counts, spatial mapping, and QC plots'
-    )
-    parser.add_argument('--dmux-dir',    required=True, help='Dir containing {barcode}_R1.fq.gz')
-    parser.add_argument('--bam-dir',     required=True, help='Dir containing {barcode}.dupsifter.stat')
-    parser.add_argument('--whitelist',   required=True, help='Spatial barcode whitelist (tab-separated)')
-    parser.add_argument('--barcode-col', type=int, default=3,
-                        help='0-indexed barcode column in whitelist (default: 3)')
-    parser.add_argument('--sample',      required=True, help='Sample name')
-    parser.add_argument('--table-dir',   required=True, help='Output directory for TSV')
-    parser.add_argument('--plots-dir',   required=True, help='Output directory for PNGs')
-    parser.add_argument('--img',         default='',    help='Optional tissue image path')
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--merged-bam', required=True,
+                   help='coord-sorted deduped BAM with CB:Z tags (from biscuit -9)')
+    p.add_argument('--sample',     required=True)
+    p.add_argument('--table-dir',  required=True)
+    p.add_argument('--plots-dir',  required=True)
+    p.add_argument('--grid-x',     type=int, default=96, help='grid X dim (default 96 = smcseq)')
+    p.add_argument('--grid-y',     type=int, default=96, help='grid Y dim (default 96 = smcseq)')
+    p.add_argument('--img',        default='', help='optional tissue image overlay path')
+    args = p.parse_args()
 
     os.makedirs(args.table_dir, exist_ok=True)
     os.makedirs(args.plots_dir, exist_ok=True)
 
-    # Count reads per barcode from dmux FASTQs and dupsifter stats
-    barcodes = sorted(
-        f.replace('_R1.fq.gz', '')
-        for f in os.listdir(args.dmux_dir)
-        if f.endswith('_R1.fq.gz')
-    )
-    counts = {}
-    for bc in barcodes:
-        fq   = os.path.join(args.dmux_dir, f'{bc}_R1.fq.gz')
-        stat = os.path.join(args.bam_dir,  f'{bc}.dupsifter.stat')
-        dna_reads   = count_fastq_reads(fq)  if os.path.exists(fq)   else 0
-        mapped, dup = parse_dupsifter(stat)  if os.path.exists(stat) else (0, 0)
-        counts[bc] = (dna_reads, mapped, dup)
+    counts = aggregate_merged_bam(args.merged_bam)
 
-    # Write spatial counts TSV
-    spatial  = load_spatial_whitelist(args.whitelist, args.barcode_col)
     tsv_path = os.path.join(args.table_dir, f'{args.sample}_spatial_barcode_counts.tsv')
+    rows = []
+    n_cells_with_reads = 0
+    for x in range(1, args.grid_x + 1):
+        for y in range(1, args.grid_y + 1):
+            cb = coord_to_acgt8(x, y)
+            total, mapped, dup = counts.get(cb, (0, 0, 0))
+            if total > 0:
+                n_cells_with_reads += 1
+            rows.append((cb, x, y, total, mapped, dup))
+    unm_total, unm_mapped, unm_dup = counts.get(UNMATCHED_CB, (0, 0, 0))
+
     with open(tsv_path, 'w') as out:
-        out.write('barcode\tx\ty\tdna_reads\tmapped_reads\tdup_reads\n')
-        for x, y, bc in spatial:
-            dna_reads, mapped, dup = counts.get(bc, (0, 0, 0))
-            out.write(f'{bc}\t{x}\t{y}\t{dna_reads}\t{mapped}\t{dup}\n')
-    n_matched = sum(1 for _, _, bc in spatial if bc in counts and counts[bc][0] > 0)
-    print(f'Matched {n_matched}/{len(spatial)} spatial barcodes with reads')
+        out.write('cb\tx\ty\tdna_reads\tmapped_reads\tdup_reads\n')
+        for cb, x, y, t, m, d in rows:
+            out.write(f'{cb}\t{x}\t{y}\t{t}\t{m}\t{d}\n')
+        out.write(f'{UNMATCHED_CB}\t0\t0\t{unm_total}\t{unm_mapped}\t{unm_dup}\n')
     print(f'Wrote {tsv_path}')
+    print(f'  {n_cells_with_reads}/{args.grid_x * args.grid_y} cells with reads')
+    print(f'  UNMATCHED: {unm_total} R1 reads ({unm_mapped} mapped, {unm_dup} dup)')
 
-    # Generate QC plots
     df = pd.read_csv(tsv_path, sep='\t')
-    df['log_dna_reads'] = np.log10(df['dna_reads'] + 1)
-    df['mapping_rate']  = np.where(df['dna_reads'] > 0, df['mapped_reads'] / df['dna_reads'], np.nan)
-    df['dup_rate']      = np.where(df['mapped_reads'] > 0, df['dup_reads'] / df['mapped_reads'], np.nan)
+    df_grid = df[df['cb'] != UNMATCHED_CB].copy()
+    df_grid['log_dna_reads'] = np.log10(df_grid['dna_reads'] + 1)
+    df_grid['mapping_rate']  = np.where(df_grid['dna_reads'] > 0,
+                                        df_grid['mapped_reads'] / df_grid['dna_reads'], np.nan)
+    df_grid['dup_rate']      = np.where(df_grid['mapped_reads'] > 0,
+                                        df_grid['dup_reads'] / df_grid['mapped_reads'], np.nan)
+
     img = args.img if args.img else None
-
     for col, title, cmap, vmin, vmax in [
-        ('dna_reads',     'DNA reads per barcode',         BLUE_YELLOW, None, None),
-        ('log_dna_reads', 'DNA reads per barcode (log10)', BLUE_YELLOW, None, None),
-        ('mapping_rate',  'Mapping rate',                  FIRE,        0.0,  1.0),
-        ('dup_rate',      'Duplication rate',              RED_GRAY,    0.0,  1.0),
+        ('dna_reads',     'DNA reads per cell',          BLUE_YELLOW, None, None),
+        ('log_dna_reads', 'DNA reads per cell (log10)',  BLUE_YELLOW, None, None),
+        ('mapping_rate',  'Mapping rate',                FIRE,        0.0,  1.0),
+        ('dup_rate',      'Duplication rate',            RED_GRAY,    0.0,  1.0),
     ]:
-        plot_metric(df, col, title, cmap,
+        plot_metric(df_grid, col, title, cmap,
                     os.path.join(args.plots_dir, f'spatial_{col}.png'),
-                    img_path=img, vmin=vmin, vmax=vmax)
+                    args.grid_x, args.grid_y, img_path=img, vmin=vmin, vmax=vmax)
 
-    plot_barcode_rank(df, args.sample, os.path.join(args.plots_dir, 'barcode_rank.png'))
+    plot_barcode_rank(df_grid, args.sample,
+                      os.path.join(args.plots_dir, 'barcode_rank.png'),
+                      args.grid_x, args.grid_y)
 
 
 if __name__ == '__main__':

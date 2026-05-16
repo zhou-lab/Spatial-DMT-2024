@@ -15,6 +15,7 @@ Raises the per-process fd ulimit to accommodate up to ~9216 cells + headers.
 """
 import argparse, os, resource, sys
 import pysam
+from cb_codec import cb_to_cell_name
 
 
 def raise_fd_limit(target=65535):
@@ -22,22 +23,6 @@ def raise_fd_limit(target=65535):
     new = min(target, hard)
     if new > soft:
         resource.setrlimit(resource.RLIMIT_NOFILE, (new, hard))
-
-
-_REV = {"A": 0, "C": 1, "G": 2, "T": 3}
-_UNMATCHED_CB = "NNNNNNNN"
-
-
-def cb_to_cell_name(cb):
-    """Return XXYY (e.g. '0142') for a valid 8-char ACGT CB, 'UNMATCHED' for
-    the all-N sentinel, or None if the CB is malformed."""
-    if cb == _UNMATCHED_CB:
-        return "UNMATCHED"
-    if len(cb) != 8 or any(c not in _REV for c in cb):
-        return None
-    x = 1 + sum(_REV[c] * (4 ** (3 - i)) for i, c in enumerate(cb[:4]))
-    y = 1 + sum(_REV[c] * (4 ** (3 - i)) for i, c in enumerate(cb[4:]))
-    return "%02d%02d" % (x, y)
 
 
 def main():

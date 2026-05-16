@@ -28,6 +28,7 @@ import argparse, gzip, os, sys
 import regex as _regex
 from fuzzysearch import find_near_matches
 from Bio import SeqIO
+from cb_codec import coord_to_acgt8, UNMATCHED_CB
 
 
 def open_fastq_file(fp):
@@ -37,32 +38,6 @@ def open_fastq_file(fp):
 def write_fastq_record(h, rid, seq, qual_ints):
     h.write("@{}\n{}\n+\n{}\n".format(
         rid, str(seq), "".join(chr(q + 33) for q in qual_ints)))
-
-
-## ACGT encoding of (X, Y) coords for the CB tag. Each axis is 0..95, fits in
-## 4 base-4 digits (4^4 = 256 > 96); two axes => 8 ACGT chars total, well under
-## dupsifter's 16-char dedup-signature cap. A=0,C=1,G=2,T=3 (seq_nt4 convention).
-## All-N is reserved as the UNMATCHED sentinel (dupsifter accepts 'N').
-_B4 = "ACGT"
-_UNMATCHED_CB = "NNNNNNNN"
-
-def coord_to_acgt8(x, y):
-    """Encode (X, Y) in [1..96] as an 8-char ACGT string (4 nt per axis, MSB-first base-4)."""
-    def enc(n):  # n in 0..255
-        return _B4[(n>>6)&3] + _B4[(n>>4)&3] + _B4[(n>>2)&3] + _B4[n&3]
-    return enc(x-1) + enc(y-1)
-
-
-def acgt8_to_coord(s):
-    """Decode 8-char ACGT back to (X, Y). Returns None for the all-N sentinel."""
-    if s == _UNMATCHED_CB:
-        return None
-    rev = {"A":0, "C":1, "G":2, "T":3}
-    def dec(s4):
-        n = 0
-        for c in s4: n = n*4 + rev[c]
-        return n + 1
-    return (dec(s[:4]), dec(s[4:]))
 
 
 def load_whitelist_with_coords(path, col):
@@ -257,7 +232,7 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
         barcode_cnt[barcode] = barcode_cnt.get(barcode, 0) + 1
 
         ## Whitelist lookup -> 8-char ACGT CB encoding (NNNNNNNN if unmatched)
-        cb_tag = _UNMATCHED_CB
+        cb_tag = UNMATCHED_CB
         if barcode in wl_map:
             cb_tag = coord_to_acgt8(*wl_map[barcode])
             n_wl_exact += 1
