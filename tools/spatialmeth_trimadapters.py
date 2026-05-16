@@ -184,8 +184,14 @@ if not wl_map:
 
 r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
 r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
-lambda_r1_out = PigzWriter(args.output_prefix + "_Lambda_R1.fq.gz")
-lambda_r2_out = PigzWriter(args.output_prefix + "_Lambda_R2.fq.gz")
+## Lambda spike-in detection (barcode-85 motif) only fires for spatialdmt.
+## smcseq has no dedicated lambda barcode -- skip creating the empty files.
+WRITE_LAMBDA = (args.protocol == "spatialdmt")
+if WRITE_LAMBDA:
+    lambda_r1_out = PigzWriter(args.output_prefix + "_Lambda_R1.fq.gz")
+    lambda_r2_out = PigzWriter(args.output_prefix + "_Lambda_R2.fq.gz")
+else:
+    lambda_r1_out = lambda_r2_out = None
 
 BARCODE85_MOTIF = "TTATTTTT"
 
@@ -280,8 +286,9 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
 
 r1_out.close()
 r2_out.close()
-lambda_r1_out.close()
-lambda_r2_out.close()
+if WRITE_LAMBDA:
+    lambda_r1_out.close()
+    lambda_r2_out.close()
 
 with open(args.output_prefix + "_stats.txt", "w") as fs:
     fs.write(f"Reads_total\t{n_reads}\n")

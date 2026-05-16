@@ -118,6 +118,23 @@ rule final_output:
 DUPSIFTER = config.get("DUPSIFTER", "/home/zhouw3/software/dupsifter/v1.3.0/bin/dupsifter")
 SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
 
+## Lambda fastq outputs only exist for spatialdmt -- smcseq has no dedicated
+## lambda barcode, so trimadapters.py doesn't write per-chunk Lambda fastqs
+## and the cat block is skipped (see _LAMBDA_CAT_BLOCK below).
+_TRIM_LAMBDA_OUTS = {}
+_LAMBDA_CAT_BLOCK = ""
+if PROTOCOL == "spatialdmt":
+    _TRIM_LAMBDA_OUTS = {
+        "lambda_r1": WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
+        "lambda_r2": WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
+    }
+    _LAMBDA_CAT_BLOCK = """
+        :> {output.lambda_r1}; :> {output.lambda_r2}
+        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.lambda_r1}
+            cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
+        done"""
+
 rule dna_trim_and_tag:
     input:
         r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
@@ -126,9 +143,8 @@ rule dna_trim_and_tag:
     output:
         r1_out    = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
         r2_out    = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
-        lambda_r1 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
-        lambda_r2 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
         stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
+        **_TRIM_LAMBDA_OUTS,
     resources:
         mem = "140G",
         time = "120:00:00",
@@ -164,15 +180,10 @@ rule dna_trim_and_tag:
 
         ## Cat per-chunk gzipped outputs (gzip concat is valid; readers stream through)
         :> {output.r1_out}; :> {output.r2_out}
-        :> {output.lambda_r1}; :> {output.lambda_r2}
         for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
             cat "$f" >> {output.r1_out}
             cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
-        done
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.lambda_r1}
-            cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
-        done
+        done""" + _LAMBDA_CAT_BLOCK + """
 
         ## Sum per-chunk stats fieldwise
         awk '{{cnt[$1]+=$2}} END {{
@@ -294,10 +305,23 @@ LAMBDA_REF_FASTA     = os.path.join(REF_DIR, _lambda_ref["REF_BASE"], _lambda_re
 LAMBDA_BISCUIT_INDEX = os.path.join(REF_DIR, _lambda_ref["REF_BASE"], _lambda_ref["BISCUIT_INDEX"])
 LAMBDA_CPG_BED       = os.path.join(REF_DIR, _lambda_ref["REF_BASE"], _lambda_ref["CPG_BED"])
 
+## Lambda alignment inputs depend on protocol:
+##   spatialdmt: dedicated barcode-85 reads only (trim/{sample}_Lambda_R{1,2}).
+##   smcseq:     no dedicated lambda barcode (Liu repo: zero hits for
+##               lambda/J02459/spike-in). Align the FULL tagged fastq to the
+##               lambda genome -- any actual spike-in reads will map; mouse
+##               reads will mostly fail to map.
+if PROTOCOL == "smcseq":
+    _LAMBDA_ALIGN_R1 = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz"
+    _LAMBDA_ALIGN_R2 = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz"
+else:
+    _LAMBDA_ALIGN_R1 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz"
+    _LAMBDA_ALIGN_R2 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz"
+
 rule dna_biscuit_align_lambda:
     input:
-        r1 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
-        r2 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
+        r1 = _LAMBDA_ALIGN_R1,
+        r2 = _LAMBDA_ALIGN_R2,
     output:
         bam      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam",
         bai      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
