@@ -604,13 +604,15 @@ rule qc_biscuit_unmatched:
         """
 
 
-## Pulls the unmatched BAM apart by the _SF / _WM suffix in qname (added by
-## spatialmeth_trimtag.py) and reports per-category mapping/dup rates so you
-## can tell whether the unmatched bucket is dominated by structure-fail noise
-## or by near-whitelist barcode errors.
+## Diagnose the unmatched bucket:
+##   1. align stats per category (SF vs WM) from the BAM
+##   2. SF anchor-fail breakdown from the R2 fastq -- re-runs each protocol
+##      anchor independently and reports the FIRST stage that fails per read
+## Emits a long-format TSV (section, key, value) consumed by qc_report.
 rule dna_unmatched_diagnostics:
     input:
-        bam = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+        bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+        r2_fastq = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
     output:
         tsv = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
     resources:
@@ -622,7 +624,10 @@ rule dna_unmatched_diagnostics:
         set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/
         {PYTHON} {workflow.basedir}/../tools/unmatched_diagnostics.py \
-            {input.bam} {output.tsv}
+            --bam {input.bam} \
+            --r2-fastq {input.r2_fastq} \
+            --protocol {PROTOCOL} \
+            --out {output.tsv}
         """
 
 rule qc_biscuit_aggregate:
