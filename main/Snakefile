@@ -572,18 +572,16 @@ rule rna_star_solo:
 # Run after preprocessing: snakemake --profile profiles/local_HPC -- qc
 ################################################################################
 
-## Biscuit 1.8 lives in the conda env at conda_2026/envs/biscuit; prepend so
-## the bare `biscuit` call inside spatialmeth_qc.sh picks up 1.8 over the
-## cluster-default 1.6.1-dev in /mnt/isilon/zhoulab/labbin.
-BISCUIT_BIN = config.get("BISCUIT_BIN",
-    "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/envs/biscuit/bin")
-
 ## Sample-level BISCUIT-QC on the merged dedup BAM (one invocation per sample,
 ## not ~9216 per-cell). Emits mapq/strand/dup tables + CpH/CpG retention-by-
 ## read-position. Does NOT pileup -- conversion table comes from dna_biscuit_
 ## pileup's already-existing per-cell VCFs (one pileup per cell, not a second
 ## sample-level one). covdist/cv intentionally not produced -- see
 ## spatialmeth_qc.sh header note on contig mismatch.
+##
+## Assumes biscuit >= 1.8 is on PATH (covdist/cv removal aside, the bare
+## `biscuit qc` subcommand we depend on landed in 1.8; the conda recipe in
+## README pins this). Same for the other biscuit-calling rules in this file.
 rule qc_biscuit:
     input:
         bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
@@ -600,7 +598,6 @@ rule qc_biscuit:
     shell:
         """
         set -xe
-        export PATH={BISCUIT_BIN}:$PATH
         mkdir -p {params.outdir}
 
         ## No --vcf arg -> spatialmeth_qc.sh skips the conversion-table awk;
@@ -629,7 +626,6 @@ rule qc_biscuit_unmatched:
     shell:
         """
         set -xeo pipefail
-        export PATH={BISCUIT_BIN}:$PATH
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_unmatched/
 
         QC={workflow.basedir}/../tools/spatialmeth_qc.sh
