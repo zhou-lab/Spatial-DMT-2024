@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-"""Per-cell read counts (total / mapped / dup) from the merged deduped BAM,
-mapped onto the (X, Y) spatial grid and rendered as heatmaps + a barcode-rank
-plot.
+"""Per-cell read counts and derived rates from the merged deduped BAM, mapped
+onto the (X, Y) spatial grid and rendered as heatmaps + a barcode-rank plot.
 
 Inputs: one merged coord-sorted BAM produced by `dna_biscuit_align`. Every
 alignment carries CB:Z:<8-char ACGT> set by biscuit -9 from the
-<origid>_<CB>_<UMI> read-name convention. We iterate the merged BAM once,
-aggregate per-CB counts, and decode CB back to (X, Y) via cb_codec.
+<origid>_<CB>_<UMI> read-name convention. Reads that failed structure or
+whitelist match never enter this BAM -- they were routed to a separate
+Unmatched fastq at the trim/tag stage, aligned independently to bam_unmatched/,
+and summarised by dna_unmatched_diagnostics. So every CB seen here is a real
+whitelist coordinate (no UNMATCHED sentinel cell).
+
+We iterate the merged BAM once, aggregate per-CB counts, decode CB back to
+(X, Y) via cb_codec, and write per-cell totals + derived rates.
 
 Outputs:
-  {table_dir}/{sample}_spatial_barcode_counts.tsv     per-cell counts
+  {table_dir}/{sample}_spatial_barcode_counts.tsv     per-cell row per grid
+                                                       position. Columns:
+                                                         cb, x, y,
+                                                         dna_reads,
+                                                         mapped_reads,
+                                                         dup_reads,
+                                                         mapping_rate (NA when
+                                                           dna_reads == 0),
+                                                         dup_rate    (NA when
+                                                           mapped_reads == 0)
   {plots_dir}/spatial_{metric}.png                    heatmaps over the grid
   {plots_dir}/barcode_rank.png                        rank vs read count
-
-Replaces the earlier per-cell-FASTQ + per-cell-dupsifter-stat path which is
-no longer produced after the demux-after-align rewrite.
 """
 import argparse, os, sys
 from collections import defaultdict
@@ -28,7 +39,7 @@ import numpy as np
 import pandas as pd
 import pysam
 
-from cb_codec import coord_to_acgt8, UNMATCHED_CB
+from cb_codec import coord_to_acgt8
 
 
 BLUE_YELLOW = LinearSegmentedColormap.from_list('blue_yellow', ['#000033', '#2255aa', '#faf9cf'])
@@ -140,25 +151,20 @@ def main():
             total, mapped, dup = counts.get(cb, (0, 0, 0))
             if total > 0:
                 n_cells_with_reads += 1
-            rows.append((cb, x, y, total, mapped, dup))
-    unm_total, unm_mapped, unm_dup = counts.get(UNMATCHED_CB, (0, 0, 0))
+            map_rate = f'{mapped/total:.6f}' if total > 0 else 'NA'
+            dup_rate = f'{dup/mapped:.6f}'   if mapped > 0 else 'NA'
+            rows.append((cb, x, y, total, mapped, dup, map_rate, dup_rate))
 
     with open(tsv_path, 'w') as out:
-        out.write('cb\tx\ty\tdna_reads\tmapped_reads\tdup_reads\n')
-        for cb, x, y, t, m, d in rows:
-            out.write(f'{cb}\t{x}\t{y}\t{t}\t{m}\t{d}\n')
-        out.write(f'{UNMATCHED_CB}\t0\t0\t{unm_total}\t{unm_mapped}\t{unm_dup}\n')
+        out.write('cb\tx\ty\tdna_reads\tmapped_reads\tdup_reads\tmapping_rate\tdup_rate\n')
+        for cb, x, y, t, m, d, mr, dr in rows:
+            out.write(f'{cb}\t{x}\t{y}\t{t}\t{m}\t{d}\t{mr}\t{dr}\n')
     print(f'Wrote {tsv_path}')
     print(f'  {n_cells_with_reads}/{args.grid_x * args.grid_y} cells with reads')
-    print(f'  UNMATCHED: {unm_total} R1 reads ({unm_mapped} mapped, {unm_dup} dup)')
 
-    df = pd.read_csv(tsv_path, sep='\t')
-    df_grid = df[df['cb'] != UNMATCHED_CB].copy()
+    ## Re-read with NA-aware parsing for the heatmap pass.
+    df_grid = pd.read_csv(tsv_path, sep='\t', na_values=['NA'])
     df_grid['log_dna_reads'] = np.log10(df_grid['dna_reads'] + 1)
-    df_grid['mapping_rate']  = np.where(df_grid['dna_reads'] > 0,
-                                        df_grid['mapped_reads'] / df_grid['dna_reads'], np.nan)
-    df_grid['dup_rate']      = np.where(df_grid['mapped_reads'] > 0,
-                                        df_grid['dup_reads'] / df_grid['mapped_reads'], np.nan)
 
     img = args.img if args.img else None
     for col, title, cmap, vmin, vmax in [

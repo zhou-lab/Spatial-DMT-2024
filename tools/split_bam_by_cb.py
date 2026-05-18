@@ -5,11 +5,13 @@ Input BAM is expected to carry CB:Z:<8-char ACGT> on every alignment (set by
 biscuit align -9 from the <origid>_<CB>_<UMI> read-name convention written by
 spatialmeth_trimtag.py). The 8-char CB is decoded back to (X, Y) using
 4-nt-per-axis base-4 (A=0 C=1 G=2 T=3), and the per-cell BAM is named
-<out_dir>/<XXYY>.bam (zero-padded). The all-N sentinel goes to UNMATCHED.bam.
+<out_dir>/<XXYY>.bam (zero-padded). Whitelist-miss and structure-fail reads
+were already split off at the trim/tag stage, so every CB here is a real
+whitelist coord -- no sentinel-CB bucket.
 
 Output BAMs are coord-sorted since the input is and we make a single pass.
-Reads with no CB tag go to UNTAGGED.bam (separate from UNMATCHED, which marks
-"barcode was parsed but missed the whitelist").
+Reads with no CB tag (shouldn't happen post-biscuit-9) go to UNTAGGED.bam
+as a safety net.
 
 Raises the per-process fd ulimit to accommodate up to ~9216 cells + headers.
 """

@@ -37,7 +37,7 @@ Outputs (one set per chunk; concatenate across chunks in the calling rule):
 import argparse, gzip, os, subprocess, sys
 import regex as _regex
 from fuzzysearch import find_near_matches
-from cb_codec import coord_to_acgt8, UNMATCHED_CB
+from cb_codec import coord_to_acgt8
 
 
 def open_fastq_file(fp):
@@ -193,10 +193,11 @@ if not wl_map:
     sys.exit(f"ERROR: empty whitelist from {args.whitelist} col {args.whitelist_col}")
 
 ## MATCHED reads (whitelist hit, exact or Hamming-1) get a real CB tag and go
-## to <prefix>_R{1,2}.fq.gz for the per-cell pipeline. UNMATCHED reads
-## (structure-pass but whitelist-miss) go to <prefix>_Unmatched_R{1,2}.fq.gz
-## for a separate align + QC track -- avoids polluting per-cell stats with the
-## fake-cell UNMATCHED bucket and prevents dupsifter's all-N over-dedup.
+## to <prefix>_R{1,2}.fq.gz for the per-cell pipeline. Structure-fail (_SF)
+## and whitelist-miss (_WM) reads go to <prefix>_Unmatched_R{1,2}.fq.gz with
+## a suffix tag in the read name -- aligned separately to bam_unmatched/ and
+## summarised by dna_unmatched_diagnostics. Keeps the merged BAM clean
+## (every CB is a real coord; no sentinel cell, no dupsifter over-dedup risk).
 r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
 r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
 unmatched_r1_out = PigzWriter(args.output_prefix + "_Unmatched_R1.fq.gz")

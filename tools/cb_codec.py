@@ -5,14 +5,16 @@ CB tag to packed_barcode=0 (dupsifter.c:get_packed_barcode at v1.3.0 L779-786),
 so a 4-digit numeric XXYY would over-dedup all bad-CB reads as one cell.
 
 Layout: 4 nt per axis, base-4 (A=0 C=1 G=2 T=3, MSB-first); X then Y. Total
-8 chars per CB; (1,1)->"AAAAAAAA", (96,96)->"CCTTCCTT". Reserves the all-N
-sentinel "NNNNNNNN" for reads that passed structural parse but missed the
-whitelist (dupsifter accepts 'N', all such reads group as one pseudo-cell).
+8 chars per CB; (1,1)->"AAAAAAAA", (96,96)->"CCTTCCTT".
+
+The merged BAM only ever contains reads with a real whitelist coord -- reads
+that fail structure or whitelist match are split out at the trim/tag stage
+into the separate Unmatched fastq pair and aligned to bam_unmatched/. There
+is no sentinel-CB cell in this codec.
 """
 
 _B4 = "ACGT"
 _REV = {"A": 0, "C": 1, "G": 2, "T": 3}
-UNMATCHED_CB = "NNNNNNNN"
 
 
 def coord_to_acgt8(x, y):
@@ -23,8 +25,8 @@ def coord_to_acgt8(x, y):
 
 
 def acgt8_to_coord(s):
-    """Decode 8-char ACGT back to (X, Y). Returns None for the all-N sentinel."""
-    if s == UNMATCHED_CB:
+    """Decode 8-char ACGT back to (X, Y). Returns None if the CB is malformed."""
+    if len(s) != 8 or any(c not in _REV for c in s):
         return None
     def dec(s4):
         n = 0
@@ -35,11 +37,8 @@ def acgt8_to_coord(s):
 
 
 def cb_to_cell_name(cb):
-    """Return 'XXYY' (e.g. '0142') for a valid CB, 'UNMATCHED' for the all-N
-    sentinel, or None if the CB is malformed (wrong length or unknown char)."""
-    if cb == UNMATCHED_CB:
-        return "UNMATCHED"
-    if len(cb) != 8 or any(c not in _REV for c in cb):
+    """Return 'XXYY' (e.g. '0142') for a valid CB, or None if malformed."""
+    xy = acgt8_to_coord(cb)
+    if xy is None:
         return None
-    x, y = acgt8_to_coord(cb)
-    return "%02d%02d" % (x, y)
+    return "%02d%02d" % xy

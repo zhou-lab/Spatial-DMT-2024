@@ -105,13 +105,20 @@ rule final_output:
 ################################################################################
 
 ## Demux-after-align architecture (smcseq + spatialdmt):
-##   1. dna_trim_and_tag: rewrite each read name as <origid>_<XXYY>_<UMI>;
-##      emit a single tagged R1/R2 pair per sample (no per-cell shards).
+##   1. dna_trim_and_tag: rewrite matched read names as <origid>_<XXYY>_<UMI>
+##      and emit a single tagged R1/R2 pair per sample. Structure-fail (_SF)
+##      and whitelist-miss (_WM) reads are split off here into a separate
+##      Unmatched fastq pair -- they never enter the merged BAM.
 ##   2. dna_biscuit_align: one biscuit align -9 → dupsifter -B (cell-aware,
-##      BS-correct) → samtools sort → split BAM by CB:Z tag into bam/XXYY.bam
-##      (the 0000 cell holds reads whose barcode missed the whitelist; renamed
-##      to bam/UNMATCHED.bam for back-compat with downstream QC rules).
-##   3. dna_biscuit_pileup: per-cell pileup over bam/*.bam (unchanged).
+##      BS-correct) → samtools sort → split BAM by CB:Z tag into bam/XXYY.bam.
+##      Every CB is a real whitelist coord (no sentinel cell).
+##   3. dna_biscuit_pileup: per-cell pileup over bam/*.bam; also emits
+##      per-cell .conv.tsv (CA/CC/CG/CT beta sum+cnt) pooled to
+##      sample-level _totalBaseConversionRate.txt for the curated table.
+##
+## Unmatched track runs in parallel: dna_biscuit_align_unmatched on the
+## separate fastq, qc_biscuit_unmatched + dna_unmatched_diagnostics surface
+## the bucket as its own MultiQC entry.
 ##
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
 ## invocations per sample.
