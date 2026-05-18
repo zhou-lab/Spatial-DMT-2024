@@ -211,7 +211,7 @@ Switch with `--config protocol=smcseq`.
 
 Matched reads (BC1+BC2 hit the whitelist, exact or Hamming-1) get an 8-char ACGT CB tag encoding their (X, Y) coord (`tools/cb_codec.py`; the ACGT encoding is required because `dupsifter -B` silently collapses any non-{ACGTN} CB tag to a single bucket), and flow through one merged FASTQ → one biscuit alignment → cell-aware `dupsifter -B` → per-cell BAM split (`tools/split_bam_by_cb.py`) → per-cell pileup.
 
-Unmatched reads — structure-fail (`_SF` suffix in read name) and whitelist-miss (`_WM`) — are split off at the trim step into a parallel `Unmatched_R{1,2}.fq.gz` pair, aligned independently into `bam_unmatched/`, and summarised by `dna_unmatched_diagnostics`. They never enter the merged BAM, so per-cell stats stay clean.
+Unmatched reads — structure-fail (`_SF` suffix in read name) and whitelist-miss (`_WM`) — are split off at the trim step into a parallel `Unmatched_R{1,2}.fq.gz` pair, aligned independently into `bam_unmatched/`, and summarised by `mqc_unmatched_diagnostics`. They never enter the merged BAM, so per-cell stats stay clean.
 
 This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawned ~9216 BISCUIT invocations per sample.
 
@@ -226,8 +226,8 @@ This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawn
 **DNA methylation branch (unmatched track):**
 
 6. `dna_biscuit_align_unmatched` — `biscuit align` + `dupsifter` (no `-B`, no `-9`) on the Unmatched FASTQ pair → `samtools sort`. Single sample-level BAM at `bam_unmatched/{sample}_unmatched.bam`.
-7. `qc_biscuit_unmatched` — Runs `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample, surfacing it as its own MultiQC entry parallel to (not mixed with) the matched-track sample-level entry.
-8. `dna_unmatched_diagnostics` — Bucket unmatched reads by `_SF`/`_WM` suffix; for SF reads, re-run the R2 anchor regexes to identify which structural anchor (primer, linker1, linker2, Tn5 ME, ...) failed first. Emits a per-sample diagnostic TSV and a single MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
+7. `mqc_unmatched_biscuit` — Runs `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample, surfacing it as its own MultiQC entry parallel to (not mixed with) the matched-track sample-level entry.
+8. `mqc_unmatched_diagnostics` — Bucket unmatched reads by `_SF`/`_WM` suffix; for SF reads, re-run the R2 anchor regexes to identify which structural anchor (primer, linker1, linker2, Tn5 ME, ...) failed first. Emits a per-sample diagnostic TSV and a single MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
 
 **RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
 
@@ -284,22 +284,27 @@ snakemake --profile "$REPO/profiles/local_HPC" \
     -- qc
 ```
 
-**QC steps (matched track):**
+QC rules are named by their **consumer**: `mqc_*` produce inputs to MultiQC (either standard BISCUIT tables or custom-content `_mqc.tsv`); `spatial_*` produce per-cell tables and heatmaps that feed the spatial-map HTML; `qc_report` is the final aggregator.
 
-- `qc_biscuit` — One `tools/spatialmeth_qc.sh` invocation on the merged dedup BAM (sample-level — not per-cell). Emits `biscuit qc` tables (mapq, strand, dup, CpH/CpG retention by read pos). Does NOT pileup — the conversion-rate table is produced by `dna_biscuit_pileup` from the per-cell VCFs (single pileup per cell, never twice). covdist/cv intentionally NOT produced — see `spatialmeth_qc.sh` header note on contig mismatch.
-- `qc_curated_metrics` — Sample-level curated MultiQC custom-content table (13 cols: Sample, reads/mapped/mapping rate from flagstat, dup rate from dupsifter `-B` stats, lambda mapped + retention, CpG coverage/depth from yame summary on `{sample}.cg`, and CA/CC/CG/CT retention from the pooled per-cell pileup VCFs — CG is the genuine CpG methylation signal, CA/CC/CT are residual non-CpG retention ≈ 0 for complete bisulfite conversion). See `tools/write_curated_metrics_mqc.py`. Mirrors the Ultima WGBS `final_report` curated-metrics pattern.
-- `qc_barcode_summary` — Single pysam pass over `bam_merged/{sample}_merged_dedup.bam` to aggregate per-CB (total, mapped, dup) counts, decode CB → (X, Y) via `cb_codec`, emit per-cell TSV (now also includes `mapping_rate` and `dup_rate` columns — NA when undefined) and four spatial heatmaps + barcode-rank plot. Grid auto-derived from whitelist.
+**MultiQC inputs (matched track):**
 
-**QC steps (unmatched track):**
+- `mqc_biscuit` — One `tools/spatialmeth_qc.sh` invocation on the merged dedup BAM (sample-level — not per-cell). Emits `biscuit qc` tables (mapq, strand, dup, CpH/CpG retention by read pos). Does NOT pileup — the conversion-rate table is produced by `dna_biscuit_pileup` from the per-cell VCFs (single pileup per cell, never twice). covdist/cv intentionally NOT produced — see `spatialmeth_qc.sh` header note on contig mismatch.
+- `mqc_curated` — Sample-level curated MultiQC custom-content table (13 cols: Sample, reads/mapped/mapping rate from flagstat, dup rate from dupsifter `-B` stats, lambda mapped + retention, CpG coverage/depth from yame summary on `{sample}.cg`, and CA/CC/CG/CT retention from the pooled per-cell pileup VCFs — CG is the genuine CpG methylation signal, CA/CC/CT are residual non-CpG retention ≈ 0 for complete bisulfite conversion). See `tools/write_curated_metrics_mqc.py`. Mirrors the Ultima WGBS `final_report` curated-metrics pattern.
 
-- `qc_biscuit_unmatched` — `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample → its own MultiQC entry.
-- `dna_unmatched_diagnostics` — SF/WM bucket breakdown + R2 anchor-fail analysis; emits MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
+**MultiQC inputs (unmatched track):**
+
+- `mqc_unmatched_biscuit` — `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample → its own MultiQC entry.
+- `mqc_unmatched_diagnostics` — SF/WM bucket breakdown + R2 anchor-fail analysis; emits MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
+
+**Spatial map (per-cell):**
+
+- `spatial_summary` — Single pysam pass over `bam_merged/{sample}_merged_dedup.bam` to aggregate per-CB (total, mapped, dup) counts, decode CB → (X, Y) via `cb_codec`, emit per-cell TSV (8 cols incl. `mapping_rate` and `dup_rate` — NA when undefined) and four spatial heatmaps + barcode-rank plot. Grid auto-derived from whitelist.
+- `spatial_features` — Per-cell mean methylation summarized over genomic features (ChromHMM, windows, chromosomes).
 
 **Aggregation:**
 
-- `qc_report` — MultiQC report aggregating BISCUIT-QC tables (matched + unmatched), STAR logs, bbduk stats, and the two custom-content `_mqc.tsv` (curated_metrics + unmatched_summary), plus a self-contained HTML report with embedded spatial plots.
-- `feature_mean` — Per-cell mean methylation summarized over genomic features (ChromHMM, windows, chromosomes).
-- `qc` — umbrella target; transitively pulls all QC rules above via `qc_report` + `feature_mean` deps.
+- `qc_report` — MultiQC report aggregating BISCUIT-QC tables (matched + unmatched), STAR logs, bbduk stats, and the two custom-content `_mqc.tsv` (curated + unmatched_summary), plus a self-contained HTML report with embedded spatial plots.
+- `qc` — umbrella target; transitively pulls all rules above via `qc_report` + `spatial_features` deps.
 
 #### QC outputs
 

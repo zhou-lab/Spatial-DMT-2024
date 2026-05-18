@@ -196,7 +196,7 @@ if not wl_map:
 ## to <prefix>_R{1,2}.fq.gz for the per-cell pipeline. Structure-fail (_SF)
 ## and whitelist-miss (_WM) reads go to <prefix>_Unmatched_R{1,2}.fq.gz with
 ## a suffix tag in the read name -- aligned separately to bam_unmatched/ and
-## summarised by dna_unmatched_diagnostics. Keeps the merged BAM clean
+## summarised by mqc_unmatched_diagnostics. Keeps the merged BAM clean
 ## (every CB is a real coord; no sentinel cell, no dupsifter over-dedup risk).
 r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
 r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
@@ -223,7 +223,7 @@ barcode_cnt = {}
 def write_unmatched(rid_suffix, rid1, seq1, qual1, rid2, seq2, qual2):
     """Send a read pair to the unmatched fastqs with a category suffix on the
     read name. rid_suffix = 'SF' (structure-fail) or 'WM' (whitelist-miss).
-    The dna_unmatched_diagnostics rule parses the suffix back out."""
+    The mqc_unmatched_diagnostics rule parses the suffix back out."""
     write_fastq_record(unmatched_r1_out, f"{rid1}_{rid_suffix}", seq1, qual1)
     write_fastq_record(unmatched_r2_out, f"{rid2}_{rid_suffix}", seq2, qual2)
 

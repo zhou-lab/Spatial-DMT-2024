@@ -117,7 +117,7 @@ rule final_output:
 ##      sample-level _totalBaseConversionRate.txt for the curated table.
 ##
 ## Unmatched track runs in parallel: dna_biscuit_align_unmatched on the
-## separate fastq, qc_biscuit_unmatched + dna_unmatched_diagnostics surface
+## separate fastq, mqc_unmatched_biscuit + mqc_unmatched_diagnostics surface
 ## the bucket as its own MultiQC entry.
 ##
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
@@ -249,7 +249,7 @@ rule dna_biscuit_align:
         ## merged BAM, so split produces only real per-cell BAMs (no UNMATCHED bucket here).
         {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
 
-        ## align_list.txt: per-cell coord tags, used by qc_biscuit + pileup as a dependency signal
+        ## align_list.txt: per-cell coord tags, used by pileup as a dependency signal
         find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
             -printf '%f\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
         """
@@ -264,7 +264,7 @@ rule dna_biscuit_pileup:
         idx       = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
         ## Sample-aggregate CA/CC/CG/CT retention extracted from the SAME
         ## per-cell VCFs we generate for the .cg above -- no second pileup
-        ## anywhere. qc_curated_metrics consumes this directly; it replaces
+        ## anywhere. mqc_curated consumes this directly; it replaces
         ## a separate feature_CH / Dinuc-bed intersection pass.
         conv_rate = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
     resources:
@@ -418,7 +418,7 @@ rule dna_biscuit_pileup_lambda:
 ## dna_trim_and_tag. Aligned to the same genome but without -9 (no CB tag in
 ## read names) and without -B (no per-cell dedup; position-based dedup is the
 ## right level here -- every read is from the "fake" UNMATCHED cell anyway).
-## Output is a single sample-level BAM that qc_biscuit_unmatched can summarize.
+## Output is a single sample-level BAM that mqc_unmatched_biscuit can summarize.
 rule dna_biscuit_align_unmatched:
     input:
         r1 = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
@@ -582,7 +582,7 @@ rule rna_star_solo:
 ## Assumes biscuit >= 1.8 is on PATH (covdist/cv removal aside, the bare
 ## `biscuit qc` subcommand we depend on landed in 1.8; the conda recipe in
 ## README pins this). Same for the other biscuit-calling rules in this file.
-rule qc_biscuit:
+rule mqc_biscuit:
     input:
         bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
     output:
@@ -610,8 +610,8 @@ rule qc_biscuit:
 
 ## Standard BISCUIT-QC on the unmatched (structure-fail + WL-miss) BAM as ONE
 ## "sample" -- becomes one entry in MultiQC, parallel to (not mixed with) the
-## per-cell qc_biscuit entries. Sees the whole unmatched bucket lumped together.
-rule qc_biscuit_unmatched:
+## per-cell mqc_biscuit entries. Sees the whole unmatched bucket lumped together.
+rule mqc_unmatched_biscuit:
     input:
         bam = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
     output:
@@ -644,7 +644,7 @@ rule qc_biscuit_unmatched:
 ##     SF/WM reads + mapping rates AND SF anchor-fail breakdown counts
 ## The _mqc.tsv lands under qc/biscuit_qc_merged/ which the qc_report rule's
 ## multiqc invocation scans -- it automatically appears in the report.
-rule dna_unmatched_diagnostics:
+rule mqc_unmatched_diagnostics:
     input:
         bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
         r2_fastq = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
@@ -675,7 +675,7 @@ rule dna_unmatched_diagnostics:
 ## mapped, lambda methylation retention). Emits a custom-content _mqc.tsv with
 ## per-column tooltip descriptions (YAML header) that MultiQC picks up under
 ## qc/biscuit_qc_merged/, alongside the unmatched diagnostic _mqc.
-rule qc_curated_metrics:
+rule mqc_curated:
     input:
         merged_bam       = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
         merged_flagstat  = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
@@ -714,7 +714,7 @@ else:
 # Per-barcode read counts, spatial mapping, and QC heatmap plots
 ## Per-cell read counts + spatial heatmaps from the merged deduped BAM (one
 ## pysam pass; aggregates per CB:Z tag, decodes back to (X, Y) via cb_codec).
-rule qc_barcode_summary:
+rule spatial_summary:
     input:
         merged_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
     output:
@@ -797,7 +797,7 @@ rule qc_report:
         """
 
 # Per-barcode mean methylation summarized over genomic features (ChromHMM, windows, chromosomes)
-rule feature_mean:
+rule spatial_features:
     input:
         cg   = WORKDIR + "/{sample}/pileup/{sample}.cg",
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),

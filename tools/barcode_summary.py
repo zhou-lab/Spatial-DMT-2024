@@ -7,7 +7,7 @@ alignment carries CB:Z:<8-char ACGT> set by biscuit -9 from the
 <origid>_<CB>_<UMI> read-name convention. Reads that failed structure or
 whitelist match never enter this BAM -- they were routed to a separate
 Unmatched fastq at the trim/tag stage, aligned independently to bam_unmatched/,
-and summarised by dna_unmatched_diagnostics. So every CB seen here is a real
+and summarised by mqc_unmatched_diagnostics. So every CB seen here is a real
 whitelist coordinate (no UNMATCHED sentinel cell).
 
 We iterate the merged BAM once, aggregate per-CB counts, decode CB back to

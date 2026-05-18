@@ -140,7 +140,7 @@ function biscuitQC {
     ## doesn't exactly match the contig set the .cg was built over (alt contigs,
     ## chrUn, chrM), the rows shift and depths are reported for the wrong CpGs.
     ## Sample-level coverage/depth are now computed from `yame summary` in the
-    ## qc_curated_metrics rule -- no row-order assumption, contig-agnostic.
+    ## mqc_curated rule -- no row-order assumption, contig-agnostic.
 
     if [[ -f ${in_vcf} ]]; then
         echo "BISCUITqc Conversion Rate by Base Average Table" \
