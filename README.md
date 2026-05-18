@@ -269,8 +269,8 @@ snakemake --profile "$REPO/profiles/local_HPC" \
 
 **QC steps:**
 
-- `qc_biscuit` — Run `tools/spatialmeth_qc.sh` (our vendored BISCUIT-QC variant; calls `biscuit qc` + uses the merged yame `.cg` for per-cell coverage shortcut, avoiding per-cell bedtools genomecov) on every per-cell BAM (24-way `parallel`). Biscuit ≥ 1.8 pinned via the `BISCUIT_BIN` config key.
-- `qc_biscuit_aggregate` — Merge per-cell BISCUIT-QC tables into sample-level summaries (`tools/aggregate_biscuit_qc.py`).
+- `qc_biscuit` — One `tools/spatialmeth_qc.sh` invocation on the merged dedup BAM (sample-level — not per-cell). Emits `biscuit qc` tables (mapq, strand, dup, CpH/CpG retention by read pos) + a one-shot `biscuit pileup` for the conversion-rate table. Biscuit ≥ 1.8 pinned via `BISCUIT_BIN`. covdist/cv intentionally NOT produced — see `spatialmeth_qc.sh` header note on contig mismatch.
+- `qc_curated_metrics` — Sample-level curated MultiQC custom-content table (12 cols: reads, mapping, dup rate, lambda mapped + retention, CpG coverage/depth/methylation from yame summary, CA/CC/CT conversion); see `tools/write_curated_metrics_mqc.py`. Mirrors the Ultima WGBS `final_report` curated-metrics pattern.
 - `qc_barcode_summary` — Single pysam pass over `bam_merged/{sample}_merged_dedup.bam` to aggregate per-CB (total, mapped, dup) counts, decode CB → (X, Y) via `cb_codec`, emit per-cell TSV and four spatial heatmaps + barcode-rank plot. Grid auto-derived from whitelist.
 - `qc_report` — MultiQC report aggregating BISCUIT-QC tables, STAR logs, and bbduk stats, plus a self-contained HTML report with embedded spatial plots.
 - `feature_mean` — Per-cell mean methylation summarized over genomic features (ChromHMM, windows, chromosomes).

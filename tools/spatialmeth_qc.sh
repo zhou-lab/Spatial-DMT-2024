@@ -133,58 +133,14 @@ function biscuitQC {
         biscuit qc ${genome} ${in_bam} ${outdir}/${sample}
     fi
 
-    # CpG coverage distribution from yame .cg file (avoids bedtools genomecov)
-    if [[ "${cg_file}" != "<unused>" && -f "${cg_file}" ]]; then
-        echo -e "BISCUITqc Uniformity Table" > ${outdir}/${sample}_cv_table.txt
-        echo -e "group\tmu\tsigma\tcv" >> ${outdir}/${sample}_cv_table.txt
-
-        # Stream chr/start/end + depth (M+U) for every reference CpG
-        cpg_depth_stream() {
-            paste \
-                <(zcat ${BISCUIT_CPGS} | cut -f1-3) \
-                <(yame subset "${cg_file}" "${barcode}" | yame unpack -f -1 - | \
-                  awk '{ print ($1~/^[0-9]/ && $2~/^[0-9]/) ? $1+$2 : 0 }')
-        }
-
-        # Compute depth histogram + cv row from a 4-col BED stream (col 4 = depth)
-        covdist_and_cv() {
-            local tag=$1
-            awk -v tag="${tag}" -v cv_out="${outdir}/${sample}_cv_table.txt" \
-                '{ cnt[$4]++ }
-                END {
-                    n=0; s=0
-                    for (d in cnt) { n+=cnt[d]; s+=d*cnt[d] }
-                    mu = (n>0) ? s/n : 0
-                    var=0; for (d in cnt) { var+=cnt[d]*(d-mu)^2 }
-                    sigma = (n>0) ? sqrt(var/n) : 0
-                    if (mu>0) print tag"\t"mu"\t"sigma"\t"sigma/mu >> cv_out
-                    for (d in cnt) print int(d)"\t"int(cnt[d])
-                }' | sort -k1,1n
-        }
-
-        echo -e "BISCUITqc Depth Distribution - All CpGs" \
-            > ${outdir}/${sample}_covdist_all_cpg_table.txt
-        echo -e "depth\tcount" >> ${outdir}/${sample}_covdist_all_cpg_table.txt
-        cpg_depth_stream | covdist_and_cv "all_cpg" \
-            >> ${outdir}/${sample}_covdist_all_cpg_table.txt
-
-        if [[ -f "${BISCUIT_TOPGC}" && -f "${BISCUIT_BOTGC}" ]]; then
-            echo -e "BISCUITqc Depth Distribution - All Top GC CpGs" \
-                > ${outdir}/${sample}_covdist_all_cpg_topgc_table.txt
-            echo -e "depth\tcount" >> ${outdir}/${sample}_covdist_all_cpg_topgc_table.txt
-            cpg_depth_stream | bedtools intersect -sorted -a stdin -b ${BISCUIT_TOPGC} | \
-                covdist_and_cv "all_cpg_topgc" \
-                >> ${outdir}/${sample}_covdist_all_cpg_topgc_table.txt
-
-            echo -e "BISCUITqc Depth Distribution - All Bot GC CpGs" \
-                > ${outdir}/${sample}_covdist_all_cpg_botgc_table.txt
-            echo -e "depth\tcount" >> ${outdir}/${sample}_covdist_all_cpg_botgc_table.txt
-            cpg_depth_stream | bedtools intersect -sorted -a stdin -b ${BISCUIT_BOTGC} | \
-                covdist_and_cv "all_cpg_botgc" \
-                >> ${outdir}/${sample}_covdist_all_cpg_botgc_table.txt
-        fi
-    fi
-
+    ## NOTE: covdist + cv_table have been deliberately dropped from this script.
+    ## The original implementation derived them via `paste <(BISCUIT_CPGS) <(yame
+    ## subset | yame unpack)`, which silently zips the reference CpG BED against
+    ## the per-sample/per-cell .cg row-by-row. When the contig set in BISCUIT_CPGS
+    ## doesn't exactly match the contig set the .cg was built over (alt contigs,
+    ## chrUn, chrM), the rows shift and depths are reported for the wrong CpGs.
+    ## Sample-level coverage/depth are now computed from `yame summary` in the
+    ## qc_curated_metrics rule -- no row-order assumption, contig-agnostic.
 
     if [[ -f ${in_vcf} ]]; then
         echo "BISCUITqc Conversion Rate by Base Average Table" \
@@ -231,7 +187,7 @@ function biscuitQC {
 
 # Print helpful usage information
 function usage {
-    >&2 echo -e "\nUsage: QC.sh [-h,--help] [-s,--single-end] [-v,--vcf] [-o,--outdir] [-k,--keep-tmp-files] [--cg-file CG] [--barcode BC] assets_directory genome sample_name in_bam\n"
+    >&2 echo -e "\nUsage: QC.sh [-h,--help] [-s,--single-end] [-v,--vcf] [-o,--outdir] [-k,--keep-tmp-files] assets_directory genome sample_name in_bam\n"
     >&2 echo -e "Required inputs:"
     >&2 echo -e "\tassets_directory    : Path to assets directory"
     >&2 echo -e "\tgenome              : Path to reference FASTA file used in alignment"
@@ -242,9 +198,7 @@ function usage {
     >&2 echo -e "\t-s,--single-end     : Input BAM is from single end data [DEFAULT: Assumes paired-end]"
     >&2 echo -e "\t-v,--vcf            : Path to VCF output from BISCUIT [DEFAULT: <unused>]"
     >&2 echo -e "\t-o,--outdir         : Output directory [DEFAULT: BISCUITqc]"
-    >&2 echo -e "\t-k,--keep-tmp-files : Flag to keep temporary files for debugging [DEFAULT: Delete files]"
-    >&2 echo -e "\t--cg-file           : Path to sample-level yame .cg file for CpG covdist [DEFAULT: <unused>]"
-    >&2 echo -e "\t--barcode           : Barcode name to extract from --cg-file [DEFAULT: empty]\n"
+    >&2 echo -e "\t-k,--keep-tmp-files : Flag to keep temporary files for debugging [DEFAULT: Delete files]\n"
 }
 
 # Initialize default values for optional inputs
@@ -252,13 +206,11 @@ in_vcf="<unused>"
 outdir="BISCUITqc"
 keep_tmp=false
 single_end=false
-cg_file="<unused>"
-barcode=""
 
 # Process command line arguments
 OPTS=$(getopt \
     --options hsv:o:k \
-    --long help,single-end,vcf:,outdir:,keep-bed-files,cg-file:,barcode: \
+    --long help,single-end,vcf:,outdir:,keep-bed-files \
     --name "$(basename "$0")" \
     -- "$@"
 )
@@ -285,14 +237,6 @@ while true; do
         -k|--keep-tmp-files )
             keep_tmp=true
             shift
-            ;;
-        --cg-file )
-            cg_file="$2"
-            shift 2
-            ;;
-        --barcode )
-            barcode="$2"
-            shift 2
             ;;
         -- )
             shift

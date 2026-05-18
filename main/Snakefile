@@ -253,8 +253,13 @@ rule dna_biscuit_pileup:
     input:
         align_txt = WORKDIR + "/{sample}/align_list.txt",
     output:
-        cg  = WORKDIR + "/{sample}/pileup/{sample}.cg",
-        idx = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
+        cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        idx       = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
+        ## Sample-aggregate CA/CC/CG/CT retention extracted from the SAME
+        ## per-cell VCFs we generate for the .cg above -- no second pileup
+        ## anywhere. qc_curated_metrics consumes this directly; it replaces
+        ## a separate feature_CH / Dinuc-bed intersection pass.
+        conv_rate = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
     resources:
         mem = "120G",
         time = "48:00:00",
@@ -265,7 +270,8 @@ rule dna_biscuit_pileup:
     shell:
         """
         set -xe
-        mkdir -p {WORKDIR}/{wildcards.sample}/pileup/
+        mkdir -p {WORKDIR}/{wildcards.sample}/pileup/ \
+                 {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/
         tmp_pileup={WORKDIR}/{wildcards.sample}/tmp/pileup/
         mkdir -p $tmp_pileup
         for bam in {WORKDIR}/{wildcards.sample}/bam/*.bam; do
@@ -276,19 +282,30 @@ rule dna_biscuit_pileup:
             tabix -p vcf $out_vcf
         done
 
-        vcf2cg() {{
-            biscuit vcf2bed -k 1 -t cg $1 | cut -f1-5 | \
+        ## Per-cell processing: emit the cell's .cg AND its CA/CC/CG/CT
+        ## conversion summary (context\\tbeta_sum\\tbeta_cnt) in one parallel
+        ## pass. The .conv.tsv files stay on disk under tmp/pileup/ -- usable
+        ## by future per-cell spatial-conversion heatmaps without re-pileup.
+        process_cell() {{
+            local vcf=$1 base
+            base=$(basename "$vcf" .vcf.gz)
+            biscuit vcf2bed -k 1 -t cg "$vcf" | cut -f1-5 | \
                 LC_ALL=C sort -k1,1 -k2,2n | \
                 biscuit mergecg {params.ref_fasta} - | \
                 bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
                 awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
                     -e '{{ M=round($7*$8); print M,$8-M;}}' | \
-                yame pack -f 3 - ;
+                yame pack -f 3 - > "$(dirname $vcf)/$base.cg"
+            biscuit vcf2bed -e -t c "$vcf" | \
+                awk -F"\\t" -v out="$(dirname $vcf)/$base.conv.tsv" '
+                    {{ sum[$6] += $8; cnt[$6] += 1 }}
+                    END {{
+                        for (c in sum) printf "%s\\t%.6f\\t%d\\n", c, sum[c], cnt[c] > out
+                    }}'
         }}
-        export -f vcf2cg
+        export -f process_cell
         parallel -j {resources.cpus_per_task} \
-            'vcf2cg {{}} > '$tmp_pileup'/$(basename {{}} .vcf.gz).cg' \
-            ::: $tmp_pileup/*.vcf.gz
+            'process_cell {{}}' ::: $tmp_pileup/*.vcf.gz
 
         :>{output.cg}
         for cg_file in $tmp_pileup/*.cg; do
@@ -296,6 +313,23 @@ rule dna_biscuit_pileup:
             cat $cg_file >> {output.cg}
             yame index -1 $barcode {output.cg}
         done
+
+        ## Sample-level CA/CC/CG/CT = record-pooled mean across per-cell
+        ## conversion files (each cell contributed beta_sum + beta_cnt above;
+        ## pooling sums then dividing = each record weighted equally, which
+        ## is the same denominator the upstream QC.sh awk uses).
+        {{
+            echo "BISCUITqc Conversion Rate by Base Average Table"
+            echo -e "CA\\tCC\\tCG\\tCT"
+            cat $tmp_pileup/*.conv.tsv | awk -F"\\t" '
+                {{ sum[$1] += $2; cnt[$1] += $3 }}
+                END {{
+                    for (c in sum) m[c] = (cnt[c] >= 20) ? sum[c]/cnt[c] : -1
+                    printf "%g\\t%g\\t%g\\t%g\\n",
+                        (("CA" in m)?m["CA"]:-1), (("CC" in m)?m["CC"]:-1),
+                        (("CG" in m)?m["CG"]:-1), (("CT" in m)?m["CT"]:-1)
+                }}'
+        }} > {output.conv_rate}
         """
 
 # Lambda spike-in: alignment and pileup for bisulfite conversion efficiency estimation.
@@ -531,45 +565,42 @@ rule rna_star_solo:
 # Run after preprocessing: snakemake --profile profiles/local_HPC -- qc
 ################################################################################
 
-# Run BISCUIT's QC.sh on every per-barcode BAM (including UNMATCHED) using its pileup VCF.
-# Results are merged into a single set of tables for MultiQC.
 ## Biscuit 1.8 lives in the conda env at conda_2026/envs/biscuit; prepend so
 ## the bare `biscuit` call inside spatialmeth_qc.sh picks up 1.8 over the
 ## cluster-default 1.6.1-dev in /mnt/isilon/zhoulab/labbin.
 BISCUIT_BIN = config.get("BISCUIT_BIN",
     "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/envs/biscuit/bin")
 
+## Sample-level BISCUIT-QC on the merged dedup BAM (one invocation per sample,
+## not ~9216 per-cell). Emits mapq/strand/dup tables + CpH/CpG retention-by-
+## read-position. Does NOT pileup -- conversion table comes from dna_biscuit_
+## pileup's already-existing per-cell VCFs (one pileup per cell, not a second
+## sample-level one). covdist/cv intentionally not produced -- see
+## spatialmeth_qc.sh header note on contig mismatch.
 rule qc_biscuit:
     input:
-        align_txt = WORKDIR + "/{sample}/align_list.txt",
-        cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
     output:
-        flag = WORKDIR + "/{sample}/qc/biscuit_qc/.done",
+        mapq = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_mapq_table.txt",
     resources:
-        mem = "32G",
-        time = "96:00:00",
-        cpus_per_task = 24,
+        mem = "12G",
+        time = "4:00:00",
+        cpus_per_task = 2,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         assets    = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_QCASSET"]),
+        outdir    = WORKDIR + "/{sample}/qc/biscuit_qc",
     shell:
         """
         set -xe
         export PATH={BISCUIT_BIN}:$PATH
-        mkdir -p {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/
+        mkdir -p {params.outdir}
 
-        QC={workflow.basedir}/../tools/spatialmeth_qc.sh
-        parallel -j {resources.cpus_per_task} \
-            "$QC -o {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/ \
-                --vcf {WORKDIR}/{wildcards.sample}/tmp/pileup/{{}}.vcf.gz \
-                --cg-file {input.cg} \
-                --barcode {{}} \
-                {params.assets} \
-                {params.ref_fasta} \
-                {wildcards.sample}_{{}} \
-                {WORKDIR}/{wildcards.sample}/bam/{{}}.bam" \
-            < {input.align_txt}
-        touch {output.flag}
+        ## No --vcf arg -> spatialmeth_qc.sh skips the conversion-table awk;
+        ## that table is emitted by dna_biscuit_pileup from the per-cell VCFs.
+        {workflow.basedir}/../tools/spatialmeth_qc.sh \
+            -o {params.outdir} \
+            {params.assets} {params.ref_fasta} {wildcards.sample} {input.bam}
         """
 
 
@@ -634,26 +665,39 @@ rule dna_unmatched_diagnostics:
             --mqc-summary {output.mqc_summary}
         """
 
-rule qc_biscuit_aggregate:
+## Sample-level curated metrics table -- the canonical sample-row in MultiQC.
+## Pulls from: merged BAM flagstat (reads, mapped), dupsifter.stat (dup_rate),
+## sample-level biscuit qc on merged BAM (CA/CC/CT conversion), yame summary on
+## {sample}.cg (cpg_coverage, cpg_depth, cpg_meth), lambda align/pileup (lambda
+## mapped, lambda methylation retention). Emits a custom-content _mqc.tsv with
+## per-column tooltip descriptions (YAML header) that MultiQC picks up under
+## qc/biscuit_qc_merged/, alongside the unmatched diagnostic _mqc.
+rule qc_curated_metrics:
     input:
-        flag          = WORKDIR + "/{sample}/qc/biscuit_qc/.done",
-        spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
-        align_txt     = WORKDIR + "/{sample}/align_list.txt",
+        merged_bam       = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
+        merged_flagstat  = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
+        merged_dupstat   = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
+        biscuit_conv     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
+        cg               = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        lambda_flagstat  = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
+        lambda_cg        = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
     output:
-        flag = WORKDIR + "/{sample}/qc/biscuit_qc_merged/.done",
+        mqc = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_curated_metrics_mqc.tsv",
     resources:
-        mem = "16G",
-        time = "4:00:00",
+        mem = "4G",
+        time = "1:00:00",
         cpus_per_task = 1,
     shell:
         """
-        {PYTHON} {workflow.basedir}/../tools/aggregate_biscuit_qc.py \
-            --input-dir      {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/ \
-            --output-dir     {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_merged/ \
-            --sample         {wildcards.sample} \
-            --align-txt      {input.align_txt} \
-            --spatial-counts {input.spatial_counts}
-        touch {output.flag}
+        {PYTHON} {workflow.basedir}/../tools/write_curated_metrics_mqc.py \
+            --sample           {wildcards.sample} \
+            --merged-flagstat  {input.merged_flagstat} \
+            --merged-dupstat   {input.merged_dupstat} \
+            --biscuit-conv     {input.biscuit_conv} \
+            --cg               {input.cg} \
+            --lambda-flagstat  {input.lambda_flagstat} \
+            --lambda-cg        {input.lambda_cg} \
+            --output           {output.mqc}
         """
 
 FEATURE_DIR    = os.path.join(REF_DIR, GENOME_FOR_PATH, "features")
@@ -693,13 +737,17 @@ rule qc_report:
     input:
         star_log       = lambda wc: (f"{WORKDIR}/{wc.sample}/rna_STAR/Log.final.out"
                                      if wc.sample in RNA_SAMPLES else []),
-        biscuit_merged = WORKDIR + "/{sample}/qc/biscuit_qc_merged/.done",
+        ## Sample-level curated metrics row (custom-content _mqc.tsv with YAML
+        ## tooltips; lands in qc/biscuit_qc_merged/, scanned by multiqc below).
+        curated_mqc    = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_curated_metrics_mqc.tsv",
+        ## Sample-level biscuit qc on merged BAM (mapq, conv tables -- MultiQC
+        ## BISCUIT module picks these up).
+        biscuit_qc     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_mapq_table.txt",
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         trim_stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
         cg             = WORKDIR + "/{sample}/pileup/{sample}.cg",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
-        ## unmatched-track diagnostic emits a _mqc.tsv into qc/biscuit_qc_merged/
-        ## that MultiQC's custom-content scanner picks up automatically.
+        ## Unmatched-track diagnostic _mqc, also lands in qc/biscuit_qc_merged/.
         unmatched_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
     output:
         multiqc      = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
@@ -730,6 +778,7 @@ rule qc_report:
         fi
         {PYTHON} -m multiqc \
             $RNA_DIRS \
+            {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/ \
             {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_merged/ \
             {WORKDIR}/{wildcards.sample}/qc/table/ \
             --outdir {WORKDIR}/{wildcards.sample}/qc/html/ \
