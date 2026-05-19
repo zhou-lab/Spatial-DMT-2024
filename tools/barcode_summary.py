@@ -64,14 +64,16 @@ def load_spatial_whitelist(path, barcode_col=3):
     return entries
 
 
-def plot_metric(df, col, title, cmap, output_path, img_path=None, vmin=None, vmax=None):
+def plot_metric(df, col, title, cmap, output_path, img_path=None, vmin=None, vmax=None,
+                spot_size=40, spot_alpha=0.50):
     fig, ax = plt.subplots(figsize=(7, 7))
     if img_path and os.path.exists(img_path):
         img = mpimg.imread(img_path)
-        ax.imshow(img, extent=[0.5, 50.5, 0.5, 50.5], aspect='auto')
+        ax.imshow(img, extent=[0.5, 50.5, 0.5, 50.5], aspect='auto', zorder=0)
     vals = df[col].values
     sc = ax.scatter(
-        df['x'], df['y'], c=vals, cmap=cmap, s=80, alpha=0.7,
+        df['x'], df['y'], c=vals, cmap=cmap, s=spot_size, alpha=spot_alpha,
+        edgecolors='none', linewidths=0, zorder=2,
         vmin=vmin if vmin is not None else np.nanpercentile(vals, 2),
         vmax=vmax if vmax is not None else np.nanpercentile(vals, 98),
     )
@@ -121,6 +123,10 @@ def main():
     parser.add_argument('--table-dir',   required=True, help='Output directory for TSV')
     parser.add_argument('--plots-dir',   required=True, help='Output directory for PNGs')
     parser.add_argument('--img',         default='',    help='Optional tissue image path')
+    parser.add_argument('--spot-size',   type=float, default=40,
+                        help='Scatter marker area in points^2 for spatial overlays (default: 40)')
+    parser.add_argument('--spot-alpha',  type=float, default=0.50,
+                        help='Scatter marker opacity for spatial overlays (default: 0.50)')
     args = parser.parse_args()
 
     os.makedirs(args.table_dir, exist_ok=True)
@@ -167,7 +173,8 @@ def main():
     ]:
         plot_metric(df, col, title, cmap,
                     os.path.join(args.plots_dir, f'spatial_{col}.png'),
-                    img_path=img, vmin=vmin, vmax=vmax)
+                    img_path=img, vmin=vmin, vmax=vmax,
+                    spot_size=args.spot_size, spot_alpha=args.spot_alpha)
 
     plot_barcode_rank(df, args.sample, os.path.join(args.plots_dir, 'barcode_rank.png'))
 
