@@ -130,7 +130,19 @@ snakemake --profile "$REPO/profiles/slurm" \
     -- final_output
 ```
 
-Supported values for `ref`: `hg38`, `mm10` (must match a key defined in your `profiles/*/site.yaml`).
+The examples above run the default `spatialdmt` protocol on `hg38`. For the **`smcseq`** protocol (96×96 mouse embryo, mm10), add `protocol=smcseq` — that single flag auto-selects the 22-mer whitelist (`barcodes/smcseq_barcodes_22mer.txt`) and derives the 96×96 grid; nothing else changes:
+
+```bash
+REPO=/absolute/path/to/Spatial-DMT-2024
+snakemake --profile "$REPO/profiles/slurm" \
+    --snakefile "$REPO/main/Snakefile" \
+    --config ref=mm10 protocol=smcseq \
+        FASTQ_DIR=/scr1/users/you/run/fastq \
+        WORKDIR=/scr1/users/you/run/pipeline_output \
+        OUTDIR=/results/run
+```
+
+Supported values for `ref`: `hg38`, `mm10` (must match a key defined in your `profiles/*/site.yaml`). The published `smcseq` mouse-embryo dataset uses `ref=mm10`.
 
 Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profiles/slurm/config.yaml`):
 
@@ -203,7 +215,7 @@ Strand handling : both linker variants (W = C-preserved, C = C→T BS-converted)
                   per read; BISCUIT auto-handles strand at alignment, no Watson/Crick split
 ```
 
-Switch with `--config protocol=smcseq`.
+Switch with `--config protocol=smcseq` — see the [smcseq run example](#running-the-pipeline) above for a full invocation.
 
 #### Pipeline steps
 
