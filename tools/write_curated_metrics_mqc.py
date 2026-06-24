@@ -19,8 +19,9 @@ Columns (suffix encodes source so the tooltip is self-documenting):
                                 lambda, so this is near 0 if no spike-in;
                                 spatialdmt: from dedicated lambda-barcode
                                 reads, near 0 = good bisulfite conversion)
-  cpg_coverage_yame             covered CpGs (M+U > 0) on {sample}.cg
-  cpg_depth_yame                mean M+U over covered CpGs
+  cpg_coverage_yame             covered CpGs (M+U > 0) after summing all
+                                indexed cells in {sample}.cg
+  cpg_depth_yame                mean M+U over covered CpGs after cell summing
   CA_retention_biscuitqc        mean beta in CA context -- residual non-CpG;
                                 near 0 = complete bisulfite conversion
   CC_retention_biscuitqc        mean beta in CC context -- residual non-CpG
@@ -85,12 +86,12 @@ HEADER = """\
 #         format: '{:.3f}'
 #     cpg_coverage_yame:
 #         title: 'CpG coverage'
-#         description: 'Number of reference CpGs with M+U > 0 from yame summary on {sample}.cg (sample-aggregate across all cells in the merged dedup BAM). Universe = the CpG set the .cg was packed against.'
+#         description: 'Number of reference CpGs with M+U > 0 from yame rowop -o musum {sample}.cg | yame summary - (sample-aggregate across all indexed cells in the merged dedup BAM). Universe = the CpG set the .cg was packed against.'
 #         format: '{:,.1f}'
 #         suffix: ' M'
 #     cpg_depth_yame:
 #         title: 'CpG depth'
-#         description: 'Mean M+U over covered CpGs from yame summary on {sample}.cg. Sample-aggregate.'
+#         description: 'Mean M+U over covered CpGs from yame rowop -o musum {sample}.cg | yame summary -. Sample-aggregate across all indexed cells.'
 #         format: '{:.2f}'
 #         suffix: 'x'
 #     CA_retention_biscuitqc:
@@ -172,14 +173,31 @@ def parse_biscuit_conv(path):
            f(d.get('CG', 'nan')), f(d.get('CT', 'nan'))
 
 
-def yame_summary(cg_path):
-    """Return (n_query, depth, beta) from `yame summary {cg}` first data row.
+def yame_summary(cg_path, aggregate_cells=False):
+    """Return (n_query, depth, beta) from a yame summary first data row.
 
     Header columns (yame summary, 2026): QFile, Query, MFile, Mask, N_univ,
     N_query, N_mask, N_overlap, Log2OddsRatio, Beta, Depth. Parse by name to
     survive future yame column re-ordering.
+
+    Sample .cg files are indexed multi-cell matrices. For sample-level CpG
+    coverage/depth, sum methylated/unmethylated counts across indexed cells
+    before summarizing; otherwise `yame summary sample.cg` reports one row per
+    cell, and reading the first row only captures spot 0101.
     """
-    out = subprocess.check_output(['yame', 'summary', cg_path], text=True)
+    if aggregate_cells:
+        rowop = subprocess.Popen(
+            ['yame', 'rowop', '-o', 'musum', cg_path],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        out = subprocess.check_output(['yame', 'summary', '-'], stdin=rowop.stdout, text=True)
+        rowop.stdout.close()
+        rowop_ret = rowop.wait()
+        if rowop_ret:
+            raise subprocess.CalledProcessError(rowop_ret, rowop.args)
+    else:
+        out = subprocess.check_output(['yame', 'summary', cg_path], text=True)
     lines = [l for l in out.splitlines() if l.strip()]
     if len(lines) < 2:
         return float('nan'), float('nan'), float('nan')
@@ -208,7 +226,7 @@ def main():
     dup_rate            = parse_dupsifter(args.merged_dupstat)
     ca, cc, cg, ct      = parse_biscuit_conv(args.biscuit_conv)
     lam_total, lam_map  = parse_flagstat(args.lambda_flagstat)
-    nq,  depth, _       = yame_summary(args.cg)
+    nq,  depth, _       = yame_summary(args.cg, aggregate_cells=True)
     _,   _,     lam_beta = yame_summary(args.lambda_cg)
 
     map_rate = (mapped / total) if total else 0.0

@@ -57,7 +57,7 @@ def main():
                 if len(parts) >= 10 and parts[0] != 'QFile':
                     state = parts[3]   # Mask column (state name)
                     beta  = parts[9]   # Beta column (methylation level)
-                    if state in ('TssA', 'Tx'):
+                    if state in ('TssA', 'Tss', 'Tx'):
                         try:
                             chromhmm[state] = float(beta)
                         except ValueError:
@@ -73,7 +73,8 @@ def main():
             return 'NA'
         return f"{val:.4f}"
 
-    tssa = chromhmm.get('TssA')
+    # hg38 names the active TSS state TssA; the mm10 ChromHMM mask names it Tss.
+    tssa = chromhmm.get('TssA', chromhmm.get('Tss'))
     tx   = chromhmm.get('Tx')
 
     os.makedirs(args.output_dir, exist_ok=True)
