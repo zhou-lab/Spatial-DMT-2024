@@ -57,9 +57,15 @@ PROTOCOL = config.get("protocol", "spatialdmt")
 if PROTOCOL == "smcseq":
     BARCODE_WHITELIST = os.path.join(BARCODES_DIR, "smcseq_barcodes_22mer.txt")
     BARCODE_WL_COL    = 1
+    RNA_BARCODE_COMPONENTS = os.path.join(BARCODES_DIR, "smcseq_rna_barcodes_8mer.txt")
+    RNA_STAR_WHITELIST = WORKDIR + "/rna_whitelist/smcseq_96x96_singlecol.txt"
+    RNA_COORD_WHITELIST = WORKDIR + "/rna_whitelist/smcseq_96x96.tsv"
 elif PROTOCOL == "spatialdmt":
     BARCODE_WHITELIST = os.path.join(BARCODES_DIR, "spatial_barcodes.txt")
     BARCODE_WL_COL    = 4
+    RNA_BARCODE_COMPONENTS = None
+    RNA_STAR_WHITELIST = os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt")
+    RNA_COORD_WHITELIST = os.path.join(BARCODES_DIR, "spatial_barcodes.txt")
 else:
     raise ValueError(f"Unknown protocol '{PROTOCOL}'. Expected spatialdmt or smcseq.")
 
@@ -105,6 +111,25 @@ def diagnostic_rna_args(wildcards):
         f"--rna-linker1-stats {WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker1.txt "
         f"--rna-linker2-stats {WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker2.txt "
         f"--rna-barcode-stats {WORKDIR}/{sample}/rna_STAR/Solo.out/Barcodes.stats"
+    )
+
+def qc_report_rna_inputs(wildcards):
+    if wildcards.sample not in RNA_SAMPLES:
+        return []
+    sample = wildcards.sample
+    return [
+        f"{WORKDIR}/{sample}/qc/table/{sample}_rna_spatial_counts.tsv",
+        f"{WORKDIR}/{sample}/qc/plots/.rna_done",
+        f"{WORKDIR}/{sample}/rna_STAR/Solo.out/GeneFull/Summary.csv",
+    ]
+
+def qc_report_rna_args(wildcards):
+    if wildcards.sample not in RNA_SAMPLES:
+        return ""
+    sample = wildcards.sample
+    return (
+        f"--rna-counts {WORKDIR}/{sample}/qc/table/{sample}_rna_spatial_counts.tsv "
+        f"--rna-summary {WORKDIR}/{sample}/rna_STAR/Solo.out/GeneFull/Summary.csv"
     )
 
 # Main entry point: run preprocessing, QC, and collect deliverables in {OUTDIR}/
@@ -583,102 +608,146 @@ rule dna_biscuit_align_unmatched:
 bbduk        = require_config("BBDUK")
 STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
 
-# Keep only R2 reads that contain the spatial primer sequence (identifies valid library molecules)
-rule rna_filter_primer:
-    input:
-        in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
-        in2 = lambda wildcards: get_fastq(wildcards, "RNA_2"),
-    output:
-        out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
-        out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
-    resources:
-        mem = "20G",
-        time = "12:00:00",
-        cpus_per_task = 12,
-    shell:
-        """
-        mkdir -p {WORKDIR}/{wildcards.sample}/tmp/rna_processed/ \
-                 {WORKDIR}/{wildcards.sample}/rna_bbduk/
-        {bbduk} \
-        in1={input.in1} in2={input.in2} \
-        outm1={output.out1} outm2={output.out2} \
-        k=22 mm=f rcomp=f restrictleft=30 skipr1=t hdist=2 \
-        stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.primer.txt \
-        threads={resources.cpus_per_task} \
-        literal=CAAGCGTTGGCTTCTCGCATCT
-        """
+if PROTOCOL == "smcseq":
+    rule smcseq_rna_whitelists:
+        input:
+            RNA_BARCODE_COMPONENTS,
+        output:
+            star = RNA_STAR_WHITELIST,
+            coordinates = RNA_COORD_WHITELIST,
+        shell:
+            """
+            {PYTHON} {workflow.basedir}/../tools/write_rna_whitelist.py \
+                --barcodes             {input} \
+                --star-whitelist       {output.star} \
+                --coordinate-whitelist {output.coordinates}
+            """
 
-# Keep reads containing linker 1 sequence in R2 (marks the BC1/BC2 junction)
-rule rna_filter_L1:
-    input:
-        in1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
-        in2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
-    output:
-        out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
-        out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
-    resources:
-        mem = "20G",
-        time = "12:00:00",
-        cpus_per_task = 12,
-    shell:
-        """
-        {bbduk} \
-        in1={input.in1} in2={input.in2} \
-        outm1={output.out1} outm2={output.out2} \
-        k=30 mm=f rcomp=f restrictleft=108 skipr1=t hdist=3 \
-        stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker1.txt \
-        threads={resources.cpus_per_task} \
-        literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
-        """
+    # LiuLab spatial-RNA grammar: 1 bp + motif + 8 bp BC1 + motif + 8 bp BC2
+    # + motif + 10 bp UMI. The leading 1 bp UMI is discarded by their ST path.
+    rule rna_fq_process:
+        input:
+            r1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
+            r2 = lambda wildcards: get_fastq(wildcards, "RNA_2"),
+        output:
+            read_seq = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
+            read_bc = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
+            primer_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.primer.txt",
+            linker1_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker1.txt",
+            linker2_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker2.txt",
+        resources:
+            mem = "20G",
+            time = "12:00:00",
+            cpus_per_task = 1,
+        shell:
+            """
+            {PYTHON} {workflow.basedir}/../tools/smcseq_rna_process.py \
+                --r1              {input.r1} \
+                --r2              {input.r2} \
+                --read-seq-output {output.read_seq} \
+                --barcode-output  {output.read_bc} \
+                --primer-stats    {output.primer_stats} \
+                --linker1-stats   {output.linker1_stats} \
+                --linker2-stats   {output.linker2_stats}
+            """
+else:
+    # Keep only R2 reads that contain the spatial primer sequence.
+    rule rna_filter_primer:
+        input:
+            in1 = lambda wildcards: get_fastq(wildcards, "RNA_1"),
+            in2 = lambda wildcards: get_fastq(wildcards, "RNA_2"),
+        output:
+            out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
+            out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
+        resources:
+            mem = "20G",
+            time = "12:00:00",
+            cpus_per_task = 12,
+        shell:
+            """
+            mkdir -p {WORKDIR}/{wildcards.sample}/tmp/rna_processed/ \
+                     {WORKDIR}/{wildcards.sample}/rna_bbduk/
+            {bbduk} \
+            in1={input.in1} in2={input.in2} \
+            outm1={output.out1} outm2={output.out2} \
+            k=22 mm=f rcomp=f restrictleft=30 skipr1=t hdist=2 \
+            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.primer.txt \
+            threads={resources.cpus_per_task} \
+            literal=CAAGCGTTGGCTTCTCGCATCT
+            """
 
-# Keep reads containing linker 2 sequence in R2 (marks the BC2/UMI junction)
-rule rna_filter_L2:
-    input:
-        in1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
-        in2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
-    output:
-        out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
-        out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
-    resources:
-        mem = "20G",
-        time = "12:00:00",
-        cpus_per_task = 12,
-    shell:
-        """
-        {bbduk} \
-        in1={input.in1} in2={input.in2} \
-        outm1={output.out1} outm2={output.out2} \
-        k=30 mm=f rcomp=f restrictleft=70 skipr1=t hdist=3 \
-        stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker2.txt \
-        threads={resources.cpus_per_task} \
-        literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
-        """
+    rule rna_filter_L1:
+        input:
+            in1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
+            in2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
+        output:
+            out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
+            out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
+        resources:
+            mem = "20G",
+            time = "12:00:00",
+            cpus_per_task = 12,
+        shell:
+            """
+            {bbduk} \
+            in1={input.in1} in2={input.in2} \
+            outm1={output.out1} outm2={output.out2} \
+            k=30 mm=f rcomp=f restrictleft=108 skipr1=t hdist=3 \
+            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker1.txt \
+            threads={resources.cpus_per_task} \
+            literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
+            """
 
-# Extract barcode+UMI from fixed positions in R2 and reformat into STARsolo-compatible read
-rule rna_fq_process:
-    input:
-        WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
-    output:
-        WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
-    resources:
-        mem = "8G",
-        time = "4:00:00",
-        cpus_per_task = 1,
-    shell:
-        """
-        {PYTHON} {workflow.basedir}/../tools/fastq_process.py --input {input} --output {output}
-        """
+    rule rna_filter_L2:
+        input:
+            in1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
+            in2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
+        output:
+            out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
+            out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
+        resources:
+            mem = "20G",
+            time = "12:00:00",
+            cpus_per_task = 12,
+        shell:
+            """
+            {bbduk} \
+            in1={input.in1} in2={input.in2} \
+            outm1={output.out1} outm2={output.out2} \
+            k=30 mm=f rcomp=f restrictleft=70 skipr1=t hdist=3 \
+            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker2.txt \
+            threads={resources.cpus_per_task} \
+            literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
+            """
+
+    # Extract barcode+UMI from fixed positions in R2 for Spatial-DMT RNA.
+    rule rna_fq_process:
+        input:
+            WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
+        output:
+            WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
+        resources:
+            mem = "8G",
+            time = "4:00:00",
+            cpus_per_task = 1,
+        shell:
+            """
+            {PYTHON} {workflow.basedir}/../tools/fastq_process.py --input {input} --output {output}
+            """
 
 # Align RNA reads and quantify gene expression per spatial barcode using STARsolo
 rule rna_star_solo:
     input:
         read_BC  = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
         read_Seq = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
-        wl       = os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt"),
+        wl       = RNA_STAR_WHITELIST,
     output:
         sam           = WORKDIR + "/{sample}/rna_STAR/Aligned.out.sam",
         log           = WORKDIR + "/{sample}/rna_STAR/Log.final.out",
         barcode_stats = WORKDIR + "/{sample}/rna_STAR/Solo.out/Barcodes.stats",
+        raw_matrix    = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/matrix.mtx",
+        raw_barcodes  = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/barcodes.tsv",
+        summary       = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/Summary.csv",
     resources:
         mem = "100G",
         time = "24:00:00",
@@ -865,6 +934,30 @@ rule spatial_summary:
         touch {output.plots_done}
         """
 
+# Per-barcode RNA UMI/gene counts and spatial heatmaps from STARsolo output
+rule rna_spatial_summary:
+    input:
+        matrix    = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/matrix.mtx",
+        barcodes  = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/barcodes.tsv",
+        whitelist = RNA_COORD_WHITELIST,
+    output:
+        spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_rna_spatial_counts.tsv",
+        plots_done     = WORKDIR + "/{sample}/qc/plots/.rna_done",
+    resources:
+        mem = "8G",
+        cpus_per_task = 1,
+    shell:
+        """
+        {PYTHON} {workflow.basedir}/../tools/rna_spatial_summary.py \
+            --matrix    {input.matrix} \
+            --barcodes  {input.barcodes} \
+            --whitelist {input.whitelist} \
+            --sample    {wildcards.sample} \
+            --table     {output.spatial_counts} \
+            --plots-dir {WORKDIR}/{wildcards.sample}/qc/plots/
+        touch {output.plots_done}
+        """
+
 # MultiQC aggregation + self-contained HTML report
 rule qc_report:
     input:
@@ -884,6 +977,7 @@ rule qc_report:
         unmatched_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
         unmatched_diagnostics = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
         diagnostic_rna = diagnostic_rna_inputs,
+        report_rna = qc_report_rna_inputs,
     output:
         multiqc      = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
         multiqc_data = directory(WORKDIR + "/{sample}/qc/html/multiqc_report_data"),
@@ -892,6 +986,7 @@ rule qc_report:
         chromhmm_sum = WORKDIR + "/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
     params:
         diagnostic_rna_args = diagnostic_rna_args,
+        report_rna_args = qc_report_rna_args,
     resources:
         mem = "12G",
         cpus_per_task = 4,
@@ -928,8 +1023,12 @@ rule qc_report:
             --plots-dir      {WORKDIR}/{wildcards.sample}/qc/plots/ \
             --sample         {wildcards.sample} \
             --multiqc-html   {output.multiqc} \
+            --protocol       {PROTOCOL} \
+            {params.report_rna_args} \
             --trim-stats            {input.trim_stats} \
             --unmatched-diagnostics {input.unmatched_diagnostics} \
+            {params.diagnostic_rna_args} \
+            {params.report_rna_args} \
             --output         {output.report}
         """
 

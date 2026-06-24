@@ -130,7 +130,7 @@ snakemake --profile "$REPO/profiles/slurm" \
     -- final_output
 ```
 
-The examples above run the default `spatialdmt` protocol on `hg38`. For the **`smcseq`** protocol (96×96 mouse embryo, mm10), add `protocol=smcseq` — that single flag auto-selects the 22-mer whitelist (`barcodes/smcseq_barcodes_22mer.txt`) and derives the 96×96 grid; nothing else changes:
+The examples above run the default `spatialdmt` protocol on `hg38`. For the **`smcseq`** protocol (96×96 mouse embryo, mm10), add `protocol=smcseq`. This selects the 22-mer DNA whitelist and the separate 16-mer spatial-RNA whitelist, and derives a 96×96 grid for both modalities:
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
@@ -243,11 +243,14 @@ This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawn
 
 **RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
 
-9.  `rna_filter_primer` — bbduk: retain R2 reads containing the spatial primer sequence
-10. `rna_filter_L1` — bbduk: retain reads containing linker 1 sequence
-11. `rna_filter_L2` — bbduk: retain reads containing linker 2 sequence
-12. `rna_fq_process` — Extract barcode (BC2+BC1, 16 bp) and UMI (10 bp) from fixed positions in R2 and reformat for STARsolo
-13. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification; outputs raw and filtered count matrices under `Solo.out/GeneFull/`
+9.  `rna_fq_process` — Protocol-specific RNA structure parsing and STARsolo read preparation. `spatialdmt` retains the existing sequential bbduk filters and fixed-position extraction. `smcseq` follows LiuLab's released spatial-RNA regex: `[1 bp][14 bp motif][8 bp BC1][30 bp motif][8 bp BC2][49 bp motif][10 bp UMI]`, and uses the standard ordered 96-entry SPLiT-seq barcode list to generate a 96×96 RNA whitelist.
+10. `rna_star_solo` — STARsolo alignment and per-barcode gene expression quantification; outputs raw and filtered count matrices under `Solo.out/GeneFull/`
+
+The `smcseq` RNA grammar is ported from LiuLab's
+[`spatial_RNA_analysis/Extract_barcode.sh`](https://github.com/LiuLab888/spatial-5mC-project/blob/main/spatial_RNA_analysis/Extract_barcode.sh)
+and [`St_pipeline.sh`](https://github.com/LiuLab888/spatial-5mC-project/blob/main/spatial_RNA_analysis/St_pipeline.sh).
+The ordered 96-entry component list is the
+[SPLiT-seq Round1/Round2 barcode set](https://github.com/Teichlab/scg_lib_structs/tree/main/data/SPLiT-seq).
 
 #### Outputs
 

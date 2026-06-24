@@ -293,7 +293,7 @@ def row(label, requirement, value, frac_failure, frac_total, description, class_
     )
 
 
-def build_sections(sample, trim, unmatched, rna=None):
+def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
     total = trim.get("Reads_total", 0)
     wl_unmatched = trim.get("WL_unmatched", 0)
     sf_reads = trim.get("Unmatched_SF", unmatched.get(("align_stats", "structure_fail_n_reads"), 0))
@@ -334,6 +334,35 @@ def build_sections(sample, trim, unmatched, rna=None):
 
     rna_html = ""
     if rna:
+        if protocol == "smcseq":
+            rna_stage1 = "Published motif1 at R2 position 2, allowing <=1 substitution."
+            rna_stage2 = "Published 30 bp motif2 after BC1, allowing <=1 edit."
+            rna_stage3 = (
+                "Published 49 bp motif3 after BC2, allowing <=2 substitutions "
+                "and <=1 insertion/deletion."
+            )
+            rna_structure = """
+      <div class="seg linker">1 bp + motif1<small>discarded + 14 bp</small></div>
+      <div class="seg bc">BC1<small>8 bp</small></div>
+      <div class="seg linker">motif2<small>30 bp, fuzzy</small></div>
+      <div class="seg bc">BC2<small>8 bp</small></div>
+      <div class="seg linker">motif3<small>49 bp, fuzzy</small></div>
+      <div class="seg tn5">UMI<small>10 bp</small></div>
+      <div class="seg genomic">remaining R2<small>discarded</small></div>
+"""
+        else:
+            rna_stage1 = "Expected 22 bp primer in R2 within Hamming distance 2."
+            rna_stage2 = "Expected 30 bp linker1 in R2 within Hamming distance 3."
+            rna_stage3 = "Expected 30 bp linker2 in R2 within Hamming distance 3."
+            rna_structure = """
+      <div class="seg linker">primer<small>22 bp, Hamming &lt;=2</small></div>
+      <div class="seg bc">BC2<small>8 bp</small></div>
+      <div class="seg linker">linker1<small>30 bp, Hamming &lt;=3</small></div>
+      <div class="seg bc">BC1<small>8 bp</small></div>
+      <div class="seg linker">linker2<small>30 bp, Hamming &lt;=3</small></div>
+      <div class="seg tn5">UMI<small>10 bp</small></div>
+      <div class="seg genomic">remaining R2<small>not used by STARsolo</small></div>
+"""
         primer, linker1, linker2, barcodes = rna
         rna_total = primer["total_reads"] // 2
         primer_pass = primer["matched_pairs"]
@@ -358,13 +387,13 @@ def build_sections(sample, trim, unmatched, rna=None):
                 "All RNA read pairs removed by sequential primer, linker1, or linker2 filtering.",
                 "summary-row"),
             row("Stage 1: primer miss", "Start", primer_miss, pct(primer_miss, rna_failure), pct(primer_miss, rna_total),
-                "Raw RNA read pairs lacking the expected 22 bp primer in R2 within Hamming distance 2.", "sf-stage stage-1"),
+                rna_stage1, "sf-stage stage-1"),
             row("Stage 2: linker1 miss", "Reached only after primer passes", linker1_miss,
                 pct(linker1_miss, rna_failure), pct(linker1_miss, rna_total),
-                "Primer-passing pairs lacking the expected 30 bp linker1 in R2 within Hamming distance 3.", "sf-stage stage-2"),
+                rna_stage2, "sf-stage stage-2"),
             row("Stage 3: linker2 miss", "Reached only after primer and linker1 pass", linker2_miss,
                 pct(linker2_miss, rna_failure), pct(linker2_miss, rna_total),
-                "Primer-and-linker1-passing pairs lacking the expected 30 bp linker2 in R2 within Hamming distance 3.", "sf-stage stage-3"),
+                rna_stage3, "sf-stage stage-3"),
             row("RNA: barcode whitelist miss", "All RNA structure stages passed", wl_miss,
                 pct(wl_miss, rna_failure), pct(wl_miss, rna_total),
                 "Structure-passing RNA read pairs whose cell barcode had no STARsolo whitelist match."),
@@ -374,13 +403,7 @@ def build_sections(sample, trim, unmatched, rna=None):
   <section class="diagnostic-panel">
     <h3>RNA R2 Structure</h3>
     <div class="rna-structure-grid" aria-label="RNA R2 structure">
-      <div class="seg linker">primer<small>22 bp, Hamming &lt;=2</small></div>
-      <div class="seg bc">BC2<small>8 bp</small></div>
-      <div class="seg linker">linker1<small>30 bp, Hamming &lt;=3</small></div>
-      <div class="seg bc">BC1<small>8 bp</small></div>
-      <div class="seg linker">linker2<small>30 bp, Hamming &lt;=3</small></div>
-      <div class="seg tn5">UMI<small>10 bp</small></div>
-      <div class="seg genomic">remaining R2<small>not used by STARsolo</small></div>
+{rna_structure}
     </div>
     <div class="rna-callout-row"><div class="bracket" style="grid-column: 1 / 2;" data-label="Primer miss"></div></div>
     <div class="rna-callout-row"><div class="bracket" style="grid-column: 3 / 4;" data-label="Linker1 miss"></div></div>
@@ -442,8 +465,8 @@ def build_sections(sample, trim, unmatched, rna=None):
 """
 
 
-def build_html(sample, trim, unmatched, rna=None):
-    sections = build_sections(sample, trim, unmatched, rna)
+def build_html(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
+    sections = build_sections(sample, trim, unmatched, rna, protocol)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -483,6 +506,7 @@ def build_html(sample, trim, unmatched, rna=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample", required=True)
+    parser.add_argument("--protocol", choices=["spatialdmt", "smcseq"], default="spatialdmt")
     parser.add_argument("--trim-stats", required=True)
     parser.add_argument("--unmatched-diagnostics", required=True)
     parser.add_argument("--rna-primer-stats")
@@ -510,7 +534,7 @@ def main():
             parse_bbduk(args.rna_linker2_stats),
             parse_barcode_stats(args.rna_barcode_stats),
         )
-    html_text = build_html(args.sample, trim, unmatched, rna)
+    html_text = build_html(args.sample, trim, unmatched, rna, args.protocol)
 
     out_dir = os.path.dirname(os.path.abspath(args.output))
     if out_dir:

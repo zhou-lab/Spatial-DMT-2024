@@ -5,12 +5,15 @@ Generate a self-contained HTML QC report embedding all spatial heatmap PNGs as b
 Inputs:
   --spatial-counts   TSV with per-barcode spatial metrics
   --plots-dir        Directory of spatial_*.png and barcode_rank.png
+  --rna-counts       Optional TSV with per-barcode RNA UMI/gene counts
+  --rna-summary      Optional STARsolo GeneFull/Summary.csv
   --multiqc-html     Path to multiqc_report.html (linked, not embedded)
   --sample           Sample name
   --output           Output HTML path
 """
 import argparse
 import base64
+import csv
 import os
 
 import pandas as pd
@@ -18,17 +21,34 @@ import pandas as pd
 from generate_dna_r2_diagnostic_html import (
     DIAGNOSTIC_CSS,
     build_sections as build_diagnostic_sections,
+    parse_barcode_stats,
+    parse_bbduk,
     parse_kv,
     parse_unmatched,
 )
 
 
-PLOT_ORDER = [
-    ('barcode_rank.png', 'DNA barcode rank vs read count'),
-    ('spatial_dna_reads.png', 'DNA reads per barcode'),
-    ('spatial_log_dna_reads.png', 'DNA reads per barcode (log10)'),
-    ('spatial_mapping_rate.png', 'DNA mapping rate'),
-    ('spatial_dup_rate.png', 'DNA duplication rate'),
+PLOT_ROWS = [
+    (
+        ('barcode_rank.png', 'DNA barcode rank vs read count'),
+        ('rna_barcode_rank.png', 'RNA barcode rank vs UMI count'),
+    ),
+    (
+        ('spatial_dna_reads.png', 'DNA reads per barcode'),
+        ('spatial_rna_umis.png', 'RNA UMIs per barcode'),
+    ),
+    (
+        ('spatial_log_dna_reads.png', 'DNA reads per barcode (log10)'),
+        ('spatial_log_rna_umis.png', 'RNA UMIs per barcode (log10)'),
+    ),
+    (
+        ('spatial_mapping_rate.png', 'DNA mapping rate'),
+        ('spatial_rna_genes.png', 'Detected RNA genes per barcode'),
+    ),
+    (
+        ('spatial_dup_rate.png', 'DNA duplication rate'),
+        ('spatial_log_rna_genes.png', 'Detected RNA genes per barcode (log10)'),
+    ),
 ]
 
 
@@ -62,6 +82,48 @@ def compute_dna_summary(spatial_counts_path):
     }
 
 
+def read_star_summary(path):
+    metrics = {}
+    with open(path, newline='') as handle:
+        for row in csv.reader(handle):
+            if len(row) >= 2:
+                metrics[row[0]] = row[1]
+    return metrics
+
+
+def compute_rna_summary(rna_counts_path, star_summary_path):
+    df = pd.read_csv(rna_counts_path, sep='\t')
+    df['rna_umis'] = pd.to_numeric(df['rna_umis'], errors='coerce').fillna(0)
+    df['rna_genes'] = pd.to_numeric(df['rna_genes'], errors='coerce').fillna(0)
+    covered = df[df['rna_umis'] > 0]
+    star = read_star_summary(star_summary_path)
+
+    def integer_metric(name):
+        try:
+            return f"{int(float(star[name])):,}"
+        except (KeyError, TypeError, ValueError):
+            return 'NA'
+
+    def percent_metric(name):
+        try:
+            return f"{100 * float(star[name]):.1f}%"
+        except (KeyError, TypeError, ValueError):
+            return 'NA'
+
+    n_covered = len(covered)
+    n_designed = len(df)
+    return {
+        'Total RNA reads': integer_metric('Number of Reads'),
+        'Reads with valid barcodes': percent_metric('Reads With Valid Barcodes'),
+        'Unique genome mapping rate': percent_metric('Reads Mapped to Genome: Unique'),
+        'Estimated cells': integer_metric('Estimated Number of Cells'),
+        'Barcodes with >=1 raw UMI': f'{n_covered:,} ({n_covered/n_designed*100:.1f}%)',
+        'Total raw RNA UMIs': f"{int(df['rna_umis'].sum()):,}",
+        'Median raw UMIs (covered barcodes)': f"{covered['rna_umis'].median():.0f}" if n_covered else '0',
+        'Median raw genes (covered barcodes)': f"{covered['rna_genes'].median():.0f}" if n_covered else '0',
+    }
+
+
 def summary_table(title, summary):
     rows = ''.join(
         f'<tr><td>{key}</td><td>{value}</td></tr>' for key, value in summary.items()
@@ -85,16 +147,21 @@ def plot_figure(plots_dir, fname, caption):
     )
 
 
-def build_html(sample, dna_summary, plots_dir, multiqc_html, diagnostic_section):
-    layout_class = ' single'
+def build_html(sample, dna_summary, plots_dir, multiqc_html, diagnostic_section, rna_summary=None):
+    layout_class = '' if rna_summary else ' single'
     summary_html = summary_table('DNA', dna_summary)
+    if rna_summary:
+        summary_html += summary_table('RNA', rna_summary)
 
     plot_rows = []
-    for plot in PLOT_ORDER:
-        plot_rows.append(f'<div class="plot-row{layout_class}">{plot_figure(plots_dir, *plot)}</div>')
+    for dna_plot, rna_plot in PLOT_ROWS:
+        figures = [plot_figure(plots_dir, *dna_plot)]
+        if rna_summary:
+            figures.append(plot_figure(plots_dir, *rna_plot))
+        plot_rows.append(f'<div class="plot-row{layout_class}">{"".join(figures)}</div>')
 
     extra_plots = []
-    known_plots = {plot[0] for plot in PLOT_ORDER}
+    known_plots = {plot[0] for row in PLOT_ROWS for plot in row}
     for fname in sorted(os.listdir(plots_dir)):
         if fname.endswith('.png') and fname not in known_plots:
             extra_plots.append(plot_figure(plots_dir, fname, os.path.splitext(fname)[0]))
@@ -157,15 +224,47 @@ def main():
     parser.add_argument('--sample', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--multiqc-html', default='')
+    parser.add_argument('--protocol', choices=['spatialdmt', 'smcseq'], default='spatialdmt')
     parser.add_argument('--trim-stats', required=True)
     parser.add_argument('--unmatched-diagnostics', required=True)
+    parser.add_argument('--rna-primer-stats')
+    parser.add_argument('--rna-linker1-stats')
+    parser.add_argument('--rna-linker2-stats')
+    parser.add_argument('--rna-barcode-stats')
+    parser.add_argument('--rna-counts')
+    parser.add_argument('--rna-summary')
     args = parser.parse_args()
 
+    if bool(args.rna_counts) != bool(args.rna_summary):
+        parser.error('--rna-counts and --rna-summary must be supplied together')
+    rna_diagnostic_paths = [
+        args.rna_primer_stats,
+        args.rna_linker1_stats,
+        args.rna_linker2_stats,
+        args.rna_barcode_stats,
+    ]
+    if any(rna_diagnostic_paths) and not all(rna_diagnostic_paths):
+        parser.error('All RNA diagnostic input arguments must be supplied together')
     dna_summary = compute_dna_summary(args.spatial_counts)
+    rna_summary = (
+        compute_rna_summary(args.rna_counts, args.rna_summary)
+        if args.rna_counts
+        else None
+    )
+    diagnostic_rna = None
+    if all(rna_diagnostic_paths):
+        diagnostic_rna = (
+            parse_bbduk(args.rna_primer_stats),
+            parse_bbduk(args.rna_linker1_stats),
+            parse_bbduk(args.rna_linker2_stats),
+            parse_barcode_stats(args.rna_barcode_stats),
+        )
     diagnostic_section = build_diagnostic_sections(
         args.sample,
         parse_kv(args.trim_stats),
         parse_unmatched(args.unmatched_diagnostics),
+        diagnostic_rna,
+        args.protocol,
     )
     html_doc = build_html(
         args.sample,
@@ -173,6 +272,7 @@ def main():
         args.plots_dir,
         args.multiqc_html,
         diagnostic_section,
+        rna_summary,
     )
 
     with open(args.output, 'w') as f:
