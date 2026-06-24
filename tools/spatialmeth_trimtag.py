@@ -4,7 +4,9 @@
 For each structure-passing read, look up its 22-mer (smcseq) or 16-mer
 (spatialdmt) barcode in the whitelist (exact, or Hamming-1 with --bc-mismatch).
 
-Whitelist HIT  -> <prefix>_R{1,2}.fq.gz with read name rewritten as
+Whitelist HIT  -> spatialdmt: <prefix>_R{1,2}.fq.gz
+                  smcseq: <prefix>_{Watson,Crick}_R1.fq.gz
+                  with read name rewritten as
                   `<origid>_<CB>_<UMI>` where:
                     CB  = 8-char ACGT encoding of (X, Y) (see tools/cb_codec.py;
                           ACGT-only is required by dupsifter -B).
@@ -28,7 +30,8 @@ Two protocols (--protocol):
   smcseq     — 96x96 grid, 11+11 bp + GGTGTAGTGGGTTTGGAGG primer prefix
 
 Outputs (one set per chunk; concatenate across chunks in the calling rule):
-  <prefix>_R1.fq.gz / <prefix>_R2.fq.gz             matched, tagged fastqs
+  <prefix>_R1.fq.gz / <prefix>_R2.fq.gz             spatialdmt matched fastqs
+  <prefix>_Watson_R1.fq.gz / _Crick_R1.fq.gz        smcseq matched fastqs
   <prefix>_Unmatched_R1.fq.gz / _R2.fq.gz           structure-pass + WL-miss
   <prefix>_Lambda_R1.fq.gz / _R2.fq.gz              spatialdmt only (smcseq skips)
   <prefix>_stats.txt                                read/whitelist counters
@@ -172,20 +175,25 @@ if args.barcode_len is None:
 
 
 def parse_r2_smcseq(s):
-    """Return (bc1_s, bc1_e, bc2_s, bc2_e, umi_start, genomic_start) or None."""
+    """Return barcode coordinates, genomic start, and Watson/Crick class."""
     m = SMCSEQ_PRIMER.match(s)
     if not m: return None
     bc1_s = m.end()
     bc1_e = bc1_s + args.bc_side_len
-    m = SMCSEQ_LK1_W.match(s, pos=bc1_e) or SMCSEQ_LK1_C.match(s, pos=bc1_e)
+    m = SMCSEQ_LK1_W.match(s, pos=bc1_e)
+    strand = "Watson"
+    if not m:
+        m = SMCSEQ_LK1_C.match(s, pos=bc1_e)
+        strand = "Crick"
     if not m: return None
     bc2_s = m.end()
     bc2_e = bc2_s + args.bc_side_len
-    m = SMCSEQ_LK2_W.match(s, pos=bc2_e) or SMCSEQ_LK2_C.match(s, pos=bc2_e)
+    m = (SMCSEQ_LK2_W if strand == "Watson" else SMCSEQ_LK2_C).match(s, pos=bc2_e)
     if not m: return None
     m_te = SMCSEQ_TRIM.match(s, pos=m.end())
     if not m_te: return None
-    return (bc1_s, bc1_e, bc2_s, bc2_e, m_te.end(), m_te.end() + SMCSEQ_UMI_LEN)
+    return (bc1_s, bc1_e, bc2_s, bc2_e, m_te.end(),
+            m_te.end() + SMCSEQ_UMI_LEN, strand)
 
 
 wl_map = load_whitelist_with_coords(args.whitelist, args.whitelist_col)
@@ -198,8 +206,14 @@ if not wl_map:
 ## a suffix tag in the read name -- aligned separately to bam_unmatched/ and
 ## summarised by mqc_unmatched_diagnostics. Keeps the merged BAM clean
 ## (every CB is a real coord; no sentinel cell, no dupsifter over-dedup risk).
-r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
-r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
+if args.protocol == "smcseq":
+    watson_r1_out = PigzWriter(args.output_prefix + "_Watson_R1.fq.gz")
+    crick_r1_out = PigzWriter(args.output_prefix + "_Crick_R1.fq.gz")
+    r1_out = r2_out = None
+else:
+    r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
+    r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
+    watson_r1_out = crick_r1_out = None
 unmatched_r1_out = PigzWriter(args.output_prefix + "_Unmatched_R1.fq.gz")
 unmatched_r2_out = PigzWriter(args.output_prefix + "_Unmatched_R2.fq.gz")
 ## Lambda spike-in detection (barcode-85 motif) only fires for spatialdmt.
@@ -217,6 +231,7 @@ n_reads = n_pass = n_trim = n_trim_bases = 0
 n_reads_barcode85 = n_written_barcode85 = 0
 n_wl_exact = n_wl_hamming1 = n_wl_unmatched = 0
 n_unmatched_sf = n_unmatched_wm = 0
+n_watson = n_crick = 0
 barcode_cnt = {}
 
 
@@ -258,10 +273,16 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
                                       rid2_raw, r2seq, r2qual)
                 n_unmatched_sf += 1
                 continue
-            b1s, l1s, b2s, l2s, umi_start, genomic_start = parsed
-            umi_seq = r2seq[umi_start:genomic_start]
+            b1s, l1s, b2s, l2s, umi_start, genomic_start, strand = parsed
+            umi_seq = r2seq[umi_start:genomic_start] or "N"
             new_seq2 = r2seq[genomic_start:]
             new_qual2 = r2qual[genomic_start:]
+            if strand == "Watson":
+                genomic_seq1 = lambda_seq1[34:]
+                genomic_qual1 = lambda_qual1[34:]
+            else:
+                genomic_seq1 = lambda_seq1[43:]
+                genomic_qual1 = lambda_qual1[43:]
         else:
             te2 = find_near_matches(args.trim_end2, r2seq, max_l_dist=1)
             if te2:
@@ -292,7 +313,8 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
         barcode = r2seq[b1s:l1s] + r2seq[b2s:l2s]
         if len(barcode) != args.barcode_len:
             continue
-        if len(lambda_seq1) < args.min_len or len(new_seq2) < args.min_len:
+        seq1_for_alignment = genomic_seq1 if args.protocol == "smcseq" else lambda_seq1
+        if len(seq1_for_alignment) < args.min_len or len(new_seq2) < args.min_len:
             continue
 
         barcode_cnt[barcode] = barcode_cnt.get(barcode, 0) + 1
@@ -318,8 +340,16 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
             cb_tag = coord_to_acgt8(*coord)
             rid1 = f"{rid1_raw}_{cb_tag}_{umi_seq}"
             rid2 = f"{rid2_raw}_{cb_tag}_{umi_seq}"
-            write_fastq_record(r1_out, rid1, lambda_seq1, lambda_qual1)
-            write_fastq_record(r2_out, rid2, new_seq2, new_qual2)
+            if args.protocol == "smcseq":
+                strand_out = watson_r1_out if strand == "Watson" else crick_r1_out
+                write_fastq_record(strand_out, rid1, genomic_seq1, genomic_qual1)
+                if strand == "Watson":
+                    n_watson += 1
+                else:
+                    n_crick += 1
+            else:
+                write_fastq_record(r1_out, rid1, lambda_seq1, lambda_qual1)
+                write_fastq_record(r2_out, rid2, new_seq2, new_qual2)
             n_pass += 1
         else:
             ## structure-pass + whitelist-miss -> unmatched track with _WM suffix.
@@ -329,8 +359,12 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
             n_unmatched_wm += 1
 
 
-r1_out.close()
-r2_out.close()
+if args.protocol == "smcseq":
+    watson_r1_out.close()
+    crick_r1_out.close()
+else:
+    r1_out.close()
+    r2_out.close()
 unmatched_r1_out.close()
 unmatched_r2_out.close()
 if WRITE_LAMBDA:
@@ -350,6 +384,9 @@ with open(args.output_prefix + "_stats.txt", "w") as fs:
     fs.write(f"Unmatched_SF\t{n_unmatched_sf}\n")
     fs.write(f"Unmatched_WM\t{n_unmatched_wm}\n")
     fs.write(f"Unmatched_written\t{n_unmatched_sf + n_unmatched_wm}\n")
+    if args.protocol == "smcseq":
+        fs.write(f"Reads_Watson\t{n_watson}\n")
+        fs.write(f"Reads_Crick\t{n_crick}\n")
 
 sorted_barcodes = sorted(barcode_cnt.items(), key=lambda x: x[1], reverse=True)
 with open(args.output_prefix + "_barcodes_all.txt", "w") as fbc:

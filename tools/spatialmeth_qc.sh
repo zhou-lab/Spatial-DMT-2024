@@ -206,6 +206,8 @@ in_vcf="<unused>"
 outdir="BISCUITqc"
 keep_tmp=false
 single_end=false
+cg_file="<unused>"
+barcode="<unused>"
 
 # Process command line arguments
 OPTS=$(getopt \

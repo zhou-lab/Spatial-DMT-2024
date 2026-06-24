@@ -49,7 +49,8 @@ RED_GRAY    = LinearSegmentedColormap.from_list('red_gray',    ['#e0e0e0', '#ee3
 
 def aggregate_merged_bam(bam_path):
     """One pass over the merged BAM; returns dict[cb_str] -> [total, mapped, dup].
-    Counts R1 only (one bucket per pair) so totals match per-pair semantics.
+    Counts R1 for paired-end records and every single-end record, so totals
+    match one-fragment semantics for both spatialdmt PE and smcseq SE.
     Skips secondary/supplementary alignments."""
     counts = defaultdict(lambda: [0, 0, 0])
     n_missing_cb = 0
@@ -57,7 +58,7 @@ def aggregate_merged_bam(bam_path):
     for read in bf:
         if read.is_secondary or read.is_supplementary:
             continue
-        if not read.is_read1:
+        if read.is_paired and not read.is_read1:
             continue
         try:
             cb = read.get_tag("CB")

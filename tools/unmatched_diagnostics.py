@@ -11,9 +11,9 @@ qname with:
 
 This script reads the post-align Unmatched BAM (for per-category alignment
 stats) AND the original Unmatched R2 fastq (for the structural-anchor probe on
-SF reads), and emits a single long-format TSV. The R2 probe re-runs each
-protocol anchor independently and reports the FIRST stage that fails for each
-SF read -- tells you whether the unmatched bucket is dominated by primer
+SF reads), and emits a single long-format TSV. The R2 probe follows the
+protocol grammar in order and reports the FIRST stage that fails for each SF
+read -- tells you whether the unmatched bucket is dominated by primer
 failures (wrong chemistry / contamination), linker drift, or short-insert
 Tn5-readthrough.
 
@@ -66,16 +66,19 @@ def categorize_sf_smcseq(s):
 
 
 def categorize_sf_spatialdmt(s):
-    """For spatialdmt the trimtag check requires len(lk1)==1, len(lk2)==1,
-    len(te2)==1 ALL true. Report which one(s) failed -- bitmask-style."""
-    lk1_ok = len(SPATIALDMT["linker1"].findall(s)) == 1
-    lk2_ok = len(SPATIALDMT["linker2"].findall(s)) == 1
-    te2_ok = len(SPATIALDMT["tn5_me"].findall(s)) == 1
-    if not lk1_ok and not lk2_ok and not te2_ok: return "all_three"
-    if not lk1_ok: return "linker1"
-    if not lk2_ok: return "linker2"
-    if not te2_ok: return "tn5_me"
-    return "all_ok"  # shouldn't happen
+    """Return the first failed Spatial-DMT grammar stage.
+
+    R2 = [8 BC1][30 linker1][8 BC2][30 linker2][19 Tn5 ME][genomic].
+    A downstream stage is evaluated only after every preceding stage passed.
+    Match anchors using the same unique-anywhere criterion as trimtag.
+    """
+    if len(SPATIALDMT["linker1"].findall(s)) != 1:
+        return "linker1"
+    if len(SPATIALDMT["linker2"].findall(s)) != 1:
+        return "linker2"
+    if len(SPATIALDMT["tn5_me"].findall(s)) != 1:
+        return "tn5_me"
+    return "all_ok"  # SF caused by a non-grammar constraint or legacy output
 
 
 def bam_align_stats(bam_path):
@@ -105,9 +108,10 @@ def bam_align_stats(bam_path):
 
 def sf_anchor_breakdown(r2_fastq, protocol):
     """For each SF read in the unmatched R2 fastq, classify which structural
-    anchor was the FIRST to fail. Returns dict[stage] -> count."""
-    categorize = categorize_sf_smcseq if protocol == "smcseq" else categorize_sf_spatialdmt
+    anchor was the FIRST to fail. Also count Spatial-DMT reads where all three
+    anchors have zero matches. Returns (first_failure_counts, overlap_counts)."""
     counts = defaultdict(int)
+    overlaps = defaultdict(int)
     opener = gzip.open if r2_fastq.endswith(".gz") else open
     with opener(r2_fastq, "rt") as f:
         while True:
@@ -119,8 +123,23 @@ def sf_anchor_breakdown(r2_fastq, protocol):
             qname = h[1:].split(None, 1)[0]
             if qname.rsplit("_", 1)[-1] != "SF":
                 continue
-            counts[categorize(seq)] += 1
-    return counts
+            if protocol == "smcseq":
+                counts[categorize_sf_smcseq(seq)] += 1
+                continue
+
+            match_counts = {
+                name: len(SPATIALDMT[name].findall(seq))
+                for name in ("linker1", "linker2", "tn5_me")
+            }
+            if all(n == 0 for n in match_counts.values()):
+                overlaps["all_three_absent"] += 1
+            for name in ("linker1", "linker2", "tn5_me"):
+                if match_counts[name] != 1:
+                    counts[name] += 1
+                    break
+            else:
+                counts["all_ok"] += 1
+    return counts, overlaps
 
 
 ## Per-column MultiQC headers. `title` = short column label shown in the table
@@ -148,9 +167,6 @@ _ANCHOR_HOVER = {
         "usually means the insert is shorter than ~110 bp, so R2 reads past "
         "the genomic end into adapter -- the Tn5 ME isn't in R2 anymore. "
         "Common for size-selected libraries; not a quality problem."),
-    "all_three": (
-        "spatialdmt: none of linker1/linker2/Tn5-ME matched uniquely. "
-        "Usually means the read is genuinely structural noise."),
 }
 
 
@@ -201,8 +217,7 @@ def _format_headers(anchor_stages):
     for s in anchor_stages:
         col(f"sf_fail_{s}",
             {"primer":"SF: primer", "linker1":"SF: linker1",
-             "linker2":"SF: linker2", "tn5_me":"SF: Tn5 ME",
-             "all_three":"SF: all 3 anchors"}[s],
+             "linker2":"SF: linker2", "tn5_me":"SF: Tn5 ME"}[s],
             f"Number of SF reads whose first failing anchor was {s}. "
             f"{anchor_descriptions[s]}",
             fmt="{:,.0f}", min_=0, scale="Oranges")
@@ -221,7 +236,7 @@ def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
     if protocol == "smcseq":
         anchor_stages = ("primer", "linker1", "linker2", "tn5_me")
     else:
-        anchor_stages = ("linker1", "linker2", "tn5_me", "all_three")
+        anchor_stages = ("linker1", "linker2", "tn5_me")
     cols = ["sf_n_reads", "sf_mapping_rate", "wm_n_reads", "wm_mapping_rate"] \
          + [f"sf_fail_{s}" for s in anchor_stages]
     vals = [sf["n_reads"], f"{sf_rate:.4f}", wm["n_reads"], f"{wm_rate:.4f}"] \
@@ -263,7 +278,7 @@ def main():
     args = ap.parse_args()
 
     align = bam_align_stats(args.bam)
-    sf_breakdown = sf_anchor_breakdown(args.r2_fastq, args.protocol)
+    sf_breakdown, sf_overlaps = sf_anchor_breakdown(args.r2_fastq, args.protocol)
 
     with open(args.out, "w") as f:
         f.write("section\tkey\tvalue\n")
@@ -283,15 +298,20 @@ def main():
         f.write(f"align_stats\ttotal_mapping_rate\t{total_mapped/total_reads if total_reads else 0:.4f}\n")
         ## SF anchor-fail breakdown
         total_sf = sum(sf_breakdown.values())
-        for stage in ("primer", "linker1", "linker2", "tn5_me", "all_three", "all_ok"):
+        for stage in ("primer", "linker1", "linker2", "tn5_me", "all_ok"):
             n = sf_breakdown.get(stage, 0)
             if stage == "primer" and args.protocol == "spatialdmt":
-                continue
-            if stage == "all_three" and args.protocol == "smcseq":
                 continue
             f.write(f"sf_anchor_fail\t{stage}_fail_n\t{n}\n")
             f.write(f"sf_anchor_fail\t{stage}_fail_frac\t{n/total_sf if total_sf else 0:.4f}\n")
         f.write(f"sf_anchor_fail\ttotal_sf\t{total_sf}\n")
+        if args.protocol == "spatialdmt":
+            all_three_absent = sf_overlaps.get("all_three_absent", 0)
+            f.write(f"sf_anchor_overlap\tall_three_absent_n\t{all_three_absent}\n")
+            f.write(
+                "sf_anchor_overlap\tall_three_absent_frac\t"
+                f"{all_three_absent/total_sf if total_sf else 0:.4f}\n"
+            )
 
     write_mqc_summary(args.mqc_summary, args.sample, align, sf_breakdown, args.protocol)
 

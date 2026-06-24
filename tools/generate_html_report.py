@@ -15,13 +15,20 @@ import os
 
 import pandas as pd
 
+from generate_dna_r2_diagnostic_html import (
+    DIAGNOSTIC_CSS,
+    build_sections as build_diagnostic_sections,
+    parse_kv,
+    parse_unmatched,
+)
+
 
 PLOT_ORDER = [
-    ('barcode_rank.png',      'Barcode rank vs DNA read count'),
+    ('barcode_rank.png', 'DNA barcode rank vs read count'),
     ('spatial_dna_reads.png', 'DNA reads per barcode'),
     ('spatial_log_dna_reads.png', 'DNA reads per barcode (log10)'),
-    ('spatial_mapping_rate.png',  'Mapping rate'),
-    ('spatial_dup_rate.png',      'Duplication rate'),
+    ('spatial_mapping_rate.png', 'DNA mapping rate'),
+    ('spatial_dup_rate.png', 'DNA duplication rate'),
 ]
 
 
@@ -30,7 +37,7 @@ def img_to_b64(path):
         return base64.b64encode(f.read()).decode()
 
 
-def compute_summary(spatial_counts_path):
+def compute_dna_summary(spatial_counts_path):
     df = pd.read_csv(spatial_counts_path, sep='\t')
     df['dna_reads']    = pd.to_numeric(df['dna_reads'],    errors='coerce').fillna(0)
     df['mapped_reads'] = pd.to_numeric(df.get('mapped_reads', 0), errors='coerce').fillna(0)
@@ -55,24 +62,45 @@ def compute_summary(spatial_counts_path):
     }
 
 
-def build_html(sample, summary, plots_dir, multiqc_html):
+def summary_table(title, summary):
     rows = ''.join(
-        f'<tr><td>{k}</td><td>{v}</td></tr>' for k, v in summary.items()
+        f'<tr><td>{key}</td><td>{value}</td></tr>' for key, value in summary.items()
+    )
+    return (
+        f'<section class="summary-table"><h3>{title}</h3><table>'
+        f'<tr><th>Metric</th><th>Value</th></tr>{rows}</table></section>'
     )
 
-    imgs_html = []
-    for fname, caption in PLOT_ORDER:
-        p = os.path.join(plots_dir, fname)
-        if os.path.exists(p):
-            b64 = img_to_b64(p)
-            imgs_html.append(
-                f'<figure><img src="data:image/png;base64,{b64}" alt="{caption}">'
-                f'<figcaption>{caption}</figcaption></figure>'
-            )
+
+def plot_figure(plots_dir, fname, caption):
+    if not fname:
+        return ''
+    p = os.path.join(plots_dir, fname)
+    if not os.path.exists(p):
+        return ''
+    b64 = img_to_b64(p)
+    return (
+        f'<figure><img src="data:image/png;base64,{b64}" alt="{caption}">'
+        f'<figcaption>{caption}</figcaption></figure>'
+    )
+
+
+def build_html(sample, dna_summary, plots_dir, multiqc_html, diagnostic_section):
+    layout_class = ' single'
+    summary_html = summary_table('DNA', dna_summary)
+
+    plot_rows = []
+    for plot in PLOT_ORDER:
+        plot_rows.append(f'<div class="plot-row{layout_class}">{plot_figure(plots_dir, *plot)}</div>')
+
+    extra_plots = []
+    known_plots = {plot[0] for plot in PLOT_ORDER}
+    for fname in sorted(os.listdir(plots_dir)):
+        if fname.endswith('.png') and fname not in known_plots:
+            extra_plots.append(plot_figure(plots_dir, fname, os.path.splitext(fname)[0]))
 
     multiqc_link = ''
     if multiqc_html and os.path.exists(multiqc_html):
-        rel = os.path.relpath(multiqc_html, os.path.dirname(multiqc_html))
         multiqc_link = f'<p><a href="{os.path.basename(multiqc_html)}" target="_blank">Open MultiQC report</a></p>'
 
     return f"""<!DOCTYPE html>
@@ -84,32 +112,42 @@ def build_html(sample, summary, plots_dir, multiqc_html):
   body {{ font-family: sans-serif; max-width: 1200px; margin: auto; padding: 1em; }}
   h1   {{ border-bottom: 2px solid #333; }}
   h2   {{ border-bottom: 1px solid #aaa; }}
-  table {{ border-collapse: collapse; margin-bottom: 1em; }}
+  h3   {{ margin: 0 0 0.6em; }}
+  table {{ border-collapse: collapse; width: 100%; margin-bottom: 1em; }}
   td, th {{ border: 1px solid #ccc; padding: 6px 12px; }}
   th {{ background: #f0f0f0; }}
-  .gallery {{ display: flex; flex-wrap: wrap; gap: 1em; }}
-  figure {{ margin: 0; text-align: center; }}
-  figure img {{ max-width: 500px; border: 1px solid #ddd; }}
+  .summary-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5em; }}
+  .plot-row {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1em; margin-bottom: 1em; }}
+  .summary-grid.single, .plot-row.single {{ grid-template-columns: 1fr; }}
+  .extra-gallery {{ display: flex; flex-wrap: wrap; gap: 1em; }}
+  figure {{ margin: 0; text-align: center; min-width: 0; }}
+  figure img {{ width: 100%; max-width: 560px; border: 1px solid #ddd; }}
   figcaption {{ font-size: 0.85em; color: #555; }}
+{DIAGNOSTIC_CSS}
+  @media (max-width: 800px) {{
+    .summary-grid, .plot-row {{ grid-template-columns: 1fr; }}
+  }}
 </style>
 </head>
 <body>
 <h1>Spatial-DMT QC Report: {sample}</h1>
 
-<h2>DNA Summary</h2>
-<table>
-<tr><th>Metric</th><th>Value</th></tr>
-{rows}
-</table>
+<h2>Summary</h2>
+<div class="summary-grid{layout_class}">
+{summary_html}
+</div>
 {multiqc_link}
 
+{diagnostic_section}
+
 <h2>Spatial Maps</h2>
-<div class="gallery">
-{''.join(imgs_html)}
-</div>
-</body>
-</html>
-"""
+{''.join(plot_rows)}
+	<div class="extra-gallery">
+	{''.join(extra_plots)}
+	</div>
+	</body>
+	</html>
+	"""
 
 
 def main():
@@ -119,13 +157,26 @@ def main():
     parser.add_argument('--sample', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--multiqc-html', default='')
+    parser.add_argument('--trim-stats', required=True)
+    parser.add_argument('--unmatched-diagnostics', required=True)
     args = parser.parse_args()
 
-    summary = compute_summary(args.spatial_counts)
-    html = build_html(args.sample, summary, args.plots_dir, args.multiqc_html)
+    dna_summary = compute_dna_summary(args.spatial_counts)
+    diagnostic_section = build_diagnostic_sections(
+        args.sample,
+        parse_kv(args.trim_stats),
+        parse_unmatched(args.unmatched_diagnostics),
+    )
+    html_doc = build_html(
+        args.sample,
+        dna_summary,
+        args.plots_dir,
+        args.multiqc_html,
+        diagnostic_section,
+    )
 
     with open(args.output, 'w') as f:
-        f.write(html)
+        f.write(html_doc)
     print(f'Wrote {args.output}')
 
 

@@ -85,6 +85,28 @@ def get_fastq(wildcards, prefix):
             return path
     return os.path.join(sample_dir, prefix + ".fq")
 
+def diagnostic_rna_inputs(wildcards):
+    if wildcards.sample not in RNA_SAMPLES:
+        return []
+    sample = wildcards.sample
+    return [
+        f"{WORKDIR}/{sample}/rna_bbduk/{sample}_stats.primer.txt",
+        f"{WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker1.txt",
+        f"{WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker2.txt",
+        f"{WORKDIR}/{sample}/rna_STAR/Solo.out/Barcodes.stats",
+    ]
+
+def diagnostic_rna_args(wildcards):
+    if wildcards.sample not in RNA_SAMPLES:
+        return ""
+    sample = wildcards.sample
+    return (
+        f"--rna-primer-stats {WORKDIR}/{sample}/rna_bbduk/{sample}_stats.primer.txt "
+        f"--rna-linker1-stats {WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker1.txt "
+        f"--rna-linker2-stats {WORKDIR}/{sample}/rna_bbduk/{sample}_stats.linker2.txt "
+        f"--rna-barcode-stats {WORKDIR}/{sample}/rna_STAR/Solo.out/Barcodes.stats"
+    )
+
 # Main entry point: run preprocessing, QC, and collect deliverables in {OUTDIR}/
 rule final_output:
     input:
@@ -104,9 +126,10 @@ rule final_output:
 # DNA Pipeline Rules
 ################################################################################
 
-## Demux-after-align architecture (smcseq + spatialdmt):
+## Demux-after-align architecture:
 ##   1. dna_trim_and_tag: rewrite matched read names as <origid>_<XXYY>_<UMI>
-##      and emit a single tagged R1/R2 pair per sample. Structure-fail (_SF)
+##      and emit spatialdmt R1/R2 pairs or clipped smcseq Watson/Crick R1.
+##      Structure-fail (_SF)
 ##      and whitelist-miss (_WM) reads are split off here into a separate
 ##      Unmatched fastq pair -- they never enter the merged BAM.
 ##   2. dna_biscuit_align: one biscuit align -9 → dupsifter -B (cell-aware,
@@ -122,15 +145,34 @@ rule final_output:
 ##
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
 ## invocations per sample.
-DUPSIFTER = config.get("DUPSIFTER", "/home/zhouw3/software/dupsifter/v1.3.0/bin/dupsifter")
+DUPSIFTER = config.get("DUPSIFTER", "/mnt/isilon/zhoulab/labbin/dupsifter")
 SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
+SMCSEQ_BSCONV_ARGS = config.get("SMCSEQ_BSCONV_ARGS", "-m 2")
+if PROTOCOL == "smcseq":
+    DNA_QC_MERGED_BAM = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam"
+    DNA_QC_MERGED_FLAGSTAT = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.flagstat"
+else:
+    DNA_QC_MERGED_BAM = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam"
+    DNA_QC_MERGED_FLAGSTAT = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat"
 
 ## Lambda fastq outputs only exist for spatialdmt -- smcseq has no dedicated
 ## lambda barcode, so spatialmeth_trimtag.py doesn't write per-chunk Lambda
 ## fastqs and the cat block is skipped (see _LAMBDA_CAT_BLOCK below).
 _TRIM_LAMBDA_OUTS = {}
 _LAMBDA_CAT_BLOCK = ""
+_TRIM_MATCHED_OUTS = {}
+_MATCHED_CAT_BLOCK = ""
 if PROTOCOL == "spatialdmt":
+    _TRIM_MATCHED_OUTS = {
+        "r1_out": WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
+        "r2_out": WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
+    }
+    _MATCHED_CAT_BLOCK = """
+        :> {output.r1_out}; :> {output.r2_out}
+        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.r1_out}
+            cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
+        done"""
     _TRIM_LAMBDA_OUTS = {
         "lambda_r1": WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
         "lambda_r2": WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
@@ -141,6 +183,17 @@ if PROTOCOL == "spatialdmt":
             cat "$f" >> {output.lambda_r1}
             cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
         done"""
+else:
+    _TRIM_MATCHED_OUTS = {
+        "watson_r1": WORKDIR + "/{sample}/trim/{sample}_Watson_R1.fq.gz",
+        "crick_r1": WORKDIR + "/{sample}/trim/{sample}_Crick_R1.fq.gz",
+    }
+    _MATCHED_CAT_BLOCK = """
+        :> {output.watson_r1}; :> {output.crick_r1}
+        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Watson_R1.fq.gz | sort -V); do
+            cat "$f" >> {output.watson_r1}
+            cat "${{f%_Watson_R1.fq.gz}}_Crick_R1.fq.gz" >> {output.crick_r1}
+        done"""
 
 rule dna_trim_and_tag:
     input:
@@ -148,16 +201,15 @@ rule dna_trim_and_tag:
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
         wl = BARCODE_WHITELIST,
     output:
-        r1_out         = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
-        r2_out         = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
         unmatched_r1   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
         unmatched_r2   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
         stats          = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
+        **_TRIM_MATCHED_OUTS,
         **_TRIM_LAMBDA_OUTS,
     resources:
-        mem = "140G",
+        mem = "90G",
         time = "120:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     shell:
         """
         set -xeo pipefail
@@ -188,16 +240,11 @@ rule dna_trim_and_tag:
         ' ::: {WORKDIR}/{wildcards.sample}/tmp/trim/_chunk_1*
 
         ## Cat per-chunk gzipped outputs (gzip concat is valid; readers stream through)
-        :> {output.r1_out}; :> {output.r2_out}
         :> {output.unmatched_r1}; :> {output.unmatched_r2}
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.r1_out}
-            cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
-        done
         for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Unmatched_R1.fq.gz | sort -V); do
             cat "$f" >> {output.unmatched_r1}
             cat "${{f%_Unmatched_R1.fq.gz}}_Unmatched_R2.fq.gz" >> {output.unmatched_r2}
-        done""" + _LAMBDA_CAT_BLOCK + """
+        done""" + _MATCHED_CAT_BLOCK + _LAMBDA_CAT_BLOCK + """
 
         ## Sum per-chunk stats fieldwise
         awk '{{cnt[$1]+=$2}} END {{
@@ -209,20 +256,51 @@ rule dna_trim_and_tag:
 ## One biscuit align call (with -9 to parse <origid>_<XXYY>_<UMI> into CB:Z+RX:Z),
 ## piped through tag-aware dupsifter -B, sorted by coord, then split into per-cell
 ## BAMs keyed on CB:Z. Replaces the 9216-cell-per-sample alignment loop.
+if PROTOCOL == "smcseq":
+    _DNA_ALIGN_INPUTS = {
+        "watson_r1": WORKDIR + "/{sample}/trim/{sample}_Watson_R1.fq.gz",
+        "crick_r1": WORKDIR + "/{sample}/trim/{sample}_Crick_R1.fq.gz",
+    }
+    _DNA_ALIGN_COMMAND = """
+        {{
+            biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} {input.watson_r1}
+            biscuit align {params.biscuit_index} -b 3 -9 -@ {resources.cpus_per_task} {input.crick_r1} | samtools view
+        }}"""
+    _DNA_ALIGN_EXTRA_OUTS = {}
+    _DNA_SPLIT_BLOCK = ""
+    _DNA_DUPSIFTER_MODE = "-s"
+else:
+    _DNA_ALIGN_INPUTS = {
+        "r1": WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
+        "r2": WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
+    }
+    _DNA_ALIGN_COMMAND = """
+        biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} \
+            {input.r2} {input.r1}"""
+    _DNA_ALIGN_EXTRA_OUTS = {
+        "align_txt": WORKDIR + "/{sample}/align_list.txt",
+    }
+    _DNA_SPLIT_BLOCK = """
+        {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
+            | parallel -j {resources.cpus_per_task} samtools index
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
+            -printf '%f\\n' | sed 's/\\.bam$//' | sort > {output.align_txt}"""
+    _DNA_DUPSIFTER_MODE = ""
+
 rule dna_biscuit_align:
     input:
-        r1 = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz",
-        r2 = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz",
+        **_DNA_ALIGN_INPUTS,
     output:
         merged_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
         merged_bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.bai",
         merged_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         dup_stats = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
-        align_txt = WORKDIR + "/{sample}/align_list.txt",
+        **_DNA_ALIGN_EXTRA_OUTS,
     resources:
-        mem = "120G",
+        mem = "160G",
         time = "96:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     params:
         biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
         ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
@@ -235,24 +313,55 @@ rule dna_biscuit_align:
 
         ## biscuit -9 parses <origid>_<CB>_<UMI> -> emits CB:Z + RX:Z tags (CB is
         ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimtag.py).
-        ## dupsifter -B uses CB tag for per-cell dedup signature (BS-correct + cell-aware).
-        ## PE mode (no -s) because both R1 and R2 are genomic after the barcode/UMI strip.
-        biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} \
-            {input.r2} {input.r1} \
-        | {DUPSIFTER} -B --stats-output {output.dup_stats} {params.ref_fasta} - \
-        | samtools sort -@ 8 -T {output.merged_bam}_tmp -O bam -o {output.merged_bam} -
+        ## dupsifter -B uses CB for per-cell dedup signatures (BS-correct +
+        ## cell-aware).
+        ## SmC-seq follows the published method: clipped R1 only, Watson in
+        ## parent orientation and Crick in daughter/PBAT-equivalent orientation.
+        """ + _DNA_ALIGN_COMMAND + """ \
+        | {DUPSIFTER} """ + _DNA_DUPSIFTER_MODE + """ -B --stats-output {output.dup_stats} {params.ref_fasta} - \
+        | samtools sort -@ 24 -T {output.merged_bam}_tmp -O bam -o {output.merged_bam} -
         samtools index {output.merged_bam}
         samtools flagstat {output.merged_bam} > {output.merged_flagstat}
-
-        ## Stream-split into per-cell BAMs (one BGZF write per cell, coord order preserved).
-        ## Whitelist-miss reads went to the separate Unmatched fastqs and never entered this
-        ## merged BAM, so split produces only real per-cell BAMs (no UNMATCHED bucket here).
-        {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
-
-        ## align_list.txt: per-cell coord tags, used by pileup as a dependency signal
-        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
-            -printf '%f\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
+        """ + _DNA_SPLIT_BLOCK + """
         """
+
+if PROTOCOL == "smcseq":
+    rule dna_bsconv_filter:
+        input:
+            bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
+            bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.bai",
+        output:
+            filtered_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam",
+            filtered_bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.bai",
+            filtered_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.flagstat",
+            bsconv_stats = WORKDIR + "/{sample}/bam_merged/{sample}.bsconv.log",
+            align_txt = WORKDIR + "/{sample}/align_list.txt",
+        resources:
+            mem = "80G",
+            time = "48:00:00",
+            cpus_per_task = 24,
+        params:
+            ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+            bsconv_args = SMCSEQ_BSCONV_ARGS,
+        shell:
+            """
+            set -xeo pipefail
+            rm -rf {WORKDIR}/{wildcards.sample}/bam/
+            mkdir -p {WORKDIR}/{wildcards.sample}/bam/
+
+            ## Default -m 2 removes reads with >=3 retained CpH calls. CpG
+            ## retention is not included in this filter.
+            biscuit bsconv {params.bsconv_args} {params.ref_fasta} {input.bam} {output.filtered_bam} \
+                2> {output.bsconv_stats}
+            samtools index {output.filtered_bam}
+            samtools flagstat {output.filtered_bam} > {output.filtered_flagstat}
+
+            {PYTHON} {SPLIT_BAM_BY_CB} {output.filtered_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
+            find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
+                | parallel -j {resources.cpus_per_task} samtools index
+            find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
+                -printf '%f\\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
+            """
 
 # CpG methylation pileup: call methylation per barcode BAM, convert VCF to CpG BED,
 # merge strands, intersect with reference CpG BED, and pack into yame .cg format.
@@ -268,26 +377,34 @@ rule dna_biscuit_pileup:
         ## a separate feature_CH / Dinuc-bed intersection pass.
         conv_rate = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
     resources:
-        mem = "120G",
+        mem = "80G",
         time = "48:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         cpg_bed   = os.path.join(REF_DIR, ref["REF_BASE"], ref["CPG_BED"]),
+        pileup_threads_per_cell = int(config.get("PILEUP_THREADS_PER_CELL", 4)),
     shell:
         """
-        set -xe
+        set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/pileup/ \
                  {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/
         tmp_pileup={WORKDIR}/{wildcards.sample}/tmp/pileup/
         mkdir -p $tmp_pileup
-        for bam in {WORKDIR}/{wildcards.sample}/bam/*.bam; do
-            barcode=$(basename $bam .bam)
-            out_vcf=$tmp_pileup/$barcode.vcf.gz
-            biscuit pileup -m 0 -a 0 -c -u -p -@ {resources.cpus_per_task} {params.ref_fasta} $bam | \
-                bgzip -c > $out_vcf
-            tabix -p vcf $out_vcf
-        done
+        pileup_threads={params.pileup_threads_per_cell}
+        pileup_jobs=$(( {resources.cpus_per_task} / pileup_threads ))
+        if [[ $pileup_jobs -lt 1 ]]; then pileup_jobs=1; fi
+
+        export tmp_pileup pileup_threads
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '*.bam' -type f | sort | \
+            parallel --halt soon,fail=1 -j "$pileup_jobs" '
+                bam={{}}
+                barcode=$(basename "$bam" .bam)
+                out_vcf="$tmp_pileup/$barcode.vcf.gz"
+                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" {params.ref_fasta} "$bam" | \
+                    bgzip -c > "$out_vcf"
+                tabix -p vcf "$out_vcf"
+            '
 
         ## Per-cell processing: emit the cell's .cg AND its CA/CC/CG/CT
         ## conversion summary (context\\tbeta_sum\\tbeta_cnt) in one parallel
@@ -352,32 +469,44 @@ LAMBDA_CPG_BED       = os.path.join(REF_DIR, _lambda_ref["REF_BASE"], _lambda_re
 ##               lambda genome -- any actual spike-in reads will map; mouse
 ##               reads will mostly fail to map.
 if PROTOCOL == "smcseq":
-    _LAMBDA_ALIGN_R1 = WORKDIR + "/{sample}/trim/{sample}_R1.fq.gz"
-    _LAMBDA_ALIGN_R2 = WORKDIR + "/{sample}/trim/{sample}_R2.fq.gz"
+    _LAMBDA_ALIGN_INPUTS = {
+        "watson_r1": WORKDIR + "/{sample}/trim/{sample}_Watson_R1.fq.gz",
+        "crick_r1": WORKDIR + "/{sample}/trim/{sample}_Crick_R1.fq.gz",
+    }
+    _LAMBDA_ALIGN_COMMAND = """
+        {{
+            biscuit align {LAMBDA_BISCUIT_INDEX} -b 1 -@ {resources.cpus_per_task} {input.watson_r1}
+            biscuit align {LAMBDA_BISCUIT_INDEX} -b 3 -@ {resources.cpus_per_task} {input.crick_r1} | samtools view
+        }}"""
+    _LAMBDA_DUPSIFTER_MODE = "-s"
 else:
-    _LAMBDA_ALIGN_R1 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz"
-    _LAMBDA_ALIGN_R2 = WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz"
+    _LAMBDA_ALIGN_INPUTS = {
+        "r1": WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
+        "r2": WORKDIR + "/{sample}/trim/{sample}_Lambda_R2.fq.gz",
+    }
+    _LAMBDA_ALIGN_COMMAND = """
+        biscuit align {LAMBDA_BISCUIT_INDEX} -b 1 -@ {resources.cpus_per_task} {input.r2} {input.r1}"""
+    _LAMBDA_DUPSIFTER_MODE = ""
 
 rule dna_biscuit_align_lambda:
     input:
-        r1 = _LAMBDA_ALIGN_R1,
-        r2 = _LAMBDA_ALIGN_R2,
+        **_LAMBDA_ALIGN_INPUTS,
     output:
         bam      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam",
         bai      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
         flagstat = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
         dup      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.dupsifter.stat",
     resources:
-        mem = "80G",
+        mem = "54G",
         time = "24:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     shell:
         """
         set -xe
         mkdir -p {WORKDIR}/{wildcards.sample}/bam_lambda/
-        biscuit align {LAMBDA_BISCUIT_INDEX} -b 1 -@ {resources.cpus_per_task} {input.r2} {input.r1} | \
-            dupsifter --stats-output {output.dup} {LAMBDA_REF_FASTA} | \
-            samtools sort -T {output.bam}_tmp -O bam -o {output.bam}
+        """ + _LAMBDA_ALIGN_COMMAND + """ | \
+            dupsifter """ + _LAMBDA_DUPSIFTER_MODE + """ --stats-output {output.dup} {LAMBDA_REF_FASTA} | \
+            samtools sort -@ 24 -T {output.bam}_tmp -O bam -o {output.bam}
         samtools index {output.bam}
         samtools flagstat {output.bam} > {output.flagstat}
         """
@@ -442,7 +571,7 @@ rule dna_biscuit_align_unmatched:
         biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} \
             {input.r2} {input.r1} \
         | {DUPSIFTER} --stats-output {output.dup} {params.ref_fasta} - \
-        | samtools sort -@ 8 -T {output.bam}_tmp -O bam -o {output.bam} -
+        | samtools sort -@ 24 -T {output.bam}_tmp -O bam -o {output.bam} -
         samtools index {output.bam}
         samtools flagstat {output.bam} > {output.flagstat}
         """
@@ -547,8 +676,9 @@ rule rna_star_solo:
         read_Seq = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
         wl       = os.path.join(BARCODES_DIR, "RNA_whitelist_singlecol.txt"),
     output:
-        sam = WORKDIR + "/{sample}/rna_STAR/Aligned.out.sam",
-        log = WORKDIR + "/{sample}/rna_STAR/Log.final.out",
+        sam           = WORKDIR + "/{sample}/rna_STAR/Aligned.out.sam",
+        log           = WORKDIR + "/{sample}/rna_STAR/Log.final.out",
+        barcode_stats = WORKDIR + "/{sample}/rna_STAR/Solo.out/Barcodes.stats",
     resources:
         mem = "100G",
         time = "24:00:00",
@@ -584,7 +714,7 @@ rule rna_star_solo:
 ## README pins this). Same for the other biscuit-calling rules in this file.
 rule mqc_biscuit:
     input:
-        bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
+        bam = DNA_QC_MERGED_BAM,
     output:
         mapq = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_mapq_table.txt",
     resources:
@@ -677,8 +807,8 @@ rule mqc_unmatched_diagnostics:
 ## qc/biscuit_qc_merged/, alongside the unmatched diagnostic _mqc.
 rule mqc_curated:
     input:
-        merged_bam       = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
-        merged_flagstat  = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
+        merged_bam       = DNA_QC_MERGED_BAM,
+        merged_flagstat  = DNA_QC_MERGED_FLAGSTAT,
         merged_dupstat   = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         biscuit_conv     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
         cg               = WORKDIR + "/{sample}/pileup/{sample}.cg",
@@ -716,7 +846,7 @@ else:
 ## pysam pass; aggregates per CB:Z tag, decodes back to (X, Y) via cb_codec).
 rule spatial_summary:
     input:
-        merged_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
+        merged_bam = DNA_QC_MERGED_BAM,
     output:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
@@ -752,12 +882,16 @@ rule qc_report:
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
         ## Unmatched-track diagnostic _mqc, also lands in qc/biscuit_qc_merged/.
         unmatched_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
+        unmatched_diagnostics = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
+        diagnostic_rna = diagnostic_rna_inputs,
     output:
         multiqc      = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
         multiqc_data = directory(WORKDIR + "/{sample}/qc/html/multiqc_report_data"),
         report       = WORKDIR + "/{sample}/qc/html/qc_report.html",
         stats_mqc    = WORKDIR + "/{sample}/qc/table/{sample}_stats_mqc.tsv",
         chromhmm_sum = WORKDIR + "/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
+    params:
+        diagnostic_rna_args = diagnostic_rna_args,
     resources:
         mem = "12G",
         cpus_per_task = 4,
@@ -777,7 +911,7 @@ rule qc_report:
             --output-dir       {WORKDIR}/{wildcards.sample}/qc/table/
         RNA_DIRS=""
         if [[ -n "{input.star_log}" ]]; then
-            RNA_DIRS=WORKDIR + "/{wildcards.sample}/rna_STAR/ {WORKDIR}/{wildcards.sample}/rna_bbduk/"
+            RNA_DIRS="{WORKDIR}/{wildcards.sample}/rna_STAR/ {WORKDIR}/{wildcards.sample}/rna_bbduk/"
         fi
         {PYTHON} -m multiqc \
             $RNA_DIRS \
@@ -787,12 +921,15 @@ rule qc_report:
             --outdir {WORKDIR}/{wildcards.sample}/qc/html/ \
             --filename multiqc_report.html \
             --force \
+            --exclude star \
             --cl-config "sample_names_replace: {{rna_STAR: {wildcards.sample}}}"
         {PYTHON} {workflow.basedir}/../tools/generate_html_report.py \
             --spatial-counts {input.spatial_counts} \
             --plots-dir      {WORKDIR}/{wildcards.sample}/qc/plots/ \
             --sample         {wildcards.sample} \
             --multiqc-html   {output.multiqc} \
+            --trim-stats            {input.trim_stats} \
+            --unmatched-diagnostics {input.unmatched_diagnostics} \
             --output         {output.report}
         """
 
@@ -804,9 +941,9 @@ rule spatial_features:
     output:
         txt = WORKDIR + "/{sample}/qc/features/{feat}.txt.gz",
     resources:
-        mem = "120G",
+        mem = "80G",
         time = "6:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     shell:
         """
         set -xe
@@ -903,7 +1040,7 @@ rule biscuit_pileup_allc:
     resources:
         mem = "250G",
         time = "168:00:00",
-        cpus_per_task = 15,
+        cpus_per_task = 45,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         allc_bed  = os.path.join(REF_DIR, ref["REF_BASE"], ref["ALLC_BED"]),
@@ -943,9 +1080,9 @@ rule feature_mean_allc:
     output:
         txt = WORKDIR + "/{sample}/qc/features_allc/{feat}.txt.gz",
     resources:
-        mem = "150G",
+        mem = "100G",
         time = "72:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = 48,
     shell:
         """
         set -xe

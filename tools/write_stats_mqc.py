@@ -4,7 +4,7 @@ Generate a MultiQC generalstats TSV from trim stats, spatial barcode counts,
 and bulk ChromHMM methylation levels (TssA, Tx) derived from a yame summary file.
 
 Reads:
-  - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, ...)
+  - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, WL_unmatched, ...)
   - {sample}_spatial_barcode_counts.tsv (per-barcode: barcode, x, y, dna_reads, ...)
   - {sample}_chromhmm_summary.tsv (yame summary output)
 
@@ -45,8 +45,10 @@ def main():
                 except ValueError:
                     pass
 
-    n_total   = stats.get('Reads_total')
-    n_linkers = stats.get('Reads_passed')
+    n_total = stats.get('Reads_total')
+    n_assigned = stats.get('Reads_passed')
+    n_wl_miss = stats.get('WL_unmatched', stats.get('Unmatched_WM', 0))
+    n_linkers = None if n_assigned is None else n_assigned + n_wl_miss
 
     # Read bulk ChromHMM methylation levels from summary file
     chromhmm = {}
