@@ -15,6 +15,19 @@ import argparse
 import os
 
 
+def genomic_total(stats):
+    """DNA read pairs excluding the barcode85/lambda bucket."""
+    if stats.get('Reads_detected') is not None:
+        return stats['Reads_detected']
+    n_total = stats.get('Reads_total')
+    if n_total is None:
+        return None
+    for key in ('Reads_barcode85', 'Reads_written_barcode85'):
+        if stats.get(key) is not None:
+            return n_total - stats[key]
+    return n_total
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--trim-stats',       required=True)
@@ -45,7 +58,7 @@ def main():
                 except ValueError:
                     pass
 
-    n_total = stats.get('Reads_total')
+    n_total = genomic_total(stats)
     n_assigned = stats.get('Reads_passed')
     n_wl_miss = stats.get('WL_unmatched', stats.get('Unmatched_WM', 0))
     n_linkers = None if n_assigned is None else n_assigned + n_wl_miss
@@ -86,7 +99,7 @@ def main():
         f.write('# section_name: "Spatial Methyl QC Stats"\n')
         f.write('# plot_type: "generalstats"\n')
         f.write('# pconfig:\n')
-        f.write('#    - total read pairs:       {title: "Total Read Pairs",       format: "{:,.0f}"}\n')
+        f.write('#    - total read pairs:       {title: "Genomic Read Pairs",     format: "{:,.0f}"}\n')
         f.write('#    - both linkers:           {title: "Both Linkers",           format: "{:,.0f}"}\n')
         f.write('#    - with designed barcodes: {title: "Designed Barcodes",      format: "{:,.0f}"}\n')
         f.write('#    - both linkers / total:   {title: "Linkers / Total (%)",    min: 0, max: 100, suffix: "%"}\n')

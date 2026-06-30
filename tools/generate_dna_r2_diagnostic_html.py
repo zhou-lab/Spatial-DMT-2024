@@ -293,8 +293,19 @@ def row(label, requirement, value, frac_failure, frac_total, description, class_
     )
 
 
-def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
+def genomic_total(trim):
+    """DNA read pairs excluding the barcode85/lambda bucket."""
+    if trim.get("Reads_detected") is not None:
+        return trim["Reads_detected"]
     total = trim.get("Reads_total", 0)
+    for key in ("Reads_barcode85", "Reads_written_barcode85"):
+        if trim.get(key) is not None:
+            return total - trim[key]
+    return total
+
+
+def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
+    total = genomic_total(trim)
     wl_unmatched = trim.get("WL_unmatched", 0)
     sf_reads = trim.get("Unmatched_SF", unmatched.get(("align_stats", "structure_fail_n_reads"), 0))
     wm_reads = trim.get("Unmatched_WM", unmatched.get(("align_stats", "wl_miss_n_reads"), 0))
@@ -308,7 +319,7 @@ def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
 
     miss_rows = "\n".join([
         row("Total read pairs", "", total, "—", "100.0%",
-            "All raw DNA read pairs entering trim/tag for this sample.", "summary-row"),
+            "Genomic DNA read pairs entering trim/tag, excluding the barcode85/lambda bucket.", "summary-row"),
         row("Total missed pairs", "Structure failures plus barcode whitelist misses", failure_reads,
             "100.0%", pct(failure_reads, total),
             "All DNA read pairs that did not enter a designed spatial barcode.", "summary-row"),
@@ -453,7 +464,7 @@ def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
         <th>Failure class</th>
         <th title="Read-pair count for this miss class.">Count</th>
         <th title="Fraction of all DNA failures: structure failures plus barcode whitelist misses.">Fraction of total failures</th>
-        <th title="Fraction of all raw DNA read pairs entering trim/tag for this sample.">Fraction of total</th>
+        <th title="Fraction of genomic DNA read pairs entering trim/tag, excluding the barcode85/lambda bucket.">Fraction of total</th>
       </tr></thead>
       <tbody>
         {miss_rows}
