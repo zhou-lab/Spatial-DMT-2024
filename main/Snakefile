@@ -853,7 +853,7 @@ rule mqc_unmatched_diagnostics:
     resources:
         mem = "8G",
         time = "4:00:00",
-        cpus_per_task = 2,
+        cpus_per_task = 24,
     shell:
         """
         set -xeo pipefail
@@ -864,7 +864,8 @@ rule mqc_unmatched_diagnostics:
             --protocol {PROTOCOL} \
             --sample {wildcards.sample} \
             --out {output.tsv} \
-            --mqc-summary {output.mqc_summary}
+            --mqc-summary {output.mqc_summary} \
+            --threads {resources.cpus_per_task}
         """
 
 ## Sample-level curated metrics table -- the canonical sample-row in MultiQC.

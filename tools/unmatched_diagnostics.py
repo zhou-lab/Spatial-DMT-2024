@@ -23,7 +23,7 @@ Usage:
       --r2-fastq trim/{sample}_Unmatched_R2.fq.gz \\
       --out      qc/unmatched_diagnostics.tsv
 """
-import argparse, gzip, sys
+import argparse, gzip, multiprocessing as mp, sys
 from collections import defaultdict
 import pysam
 import regex as _regex
@@ -81,11 +81,11 @@ def categorize_sf_spatialdmt(s):
     return "all_ok"  # SF caused by a non-grammar constraint or legacy output
 
 
-def bam_align_stats(bam_path):
+def bam_align_stats(bam_path, threads=1):
     """Per-suffix alignment stats from the BAM. Counts R1-primary only."""
     counts = defaultdict(lambda: {"n_reads": 0, "n_mapped": 0, "n_dup": 0})
     n_other = 0
-    bf = pysam.AlignmentFile(bam_path, "rb")
+    bf = pysam.AlignmentFile(bam_path, "rb", threads=max(1, threads))
     for read in bf:
         if read.is_secondary or read.is_supplementary: continue
         if not read.is_read1: continue
@@ -106,39 +106,88 @@ def bam_align_stats(bam_path):
     return counts
 
 
-def sf_anchor_breakdown(r2_fastq, protocol):
-    """For each SF read in the unmatched R2 fastq, classify which structural
-    anchor was the FIRST to fail. Also count Spatial-DMT reads where all three
-    anchors have zero matches. Returns (first_failure_counts, overlap_counts)."""
+def _merge_counts(dst, src):
+    for k, v in src.items():
+        dst[k] += v
+
+
+def _classify_sf_batch(args):
+    protocol, seqs = args
     counts = defaultdict(int)
     overlaps = defaultdict(int)
+    if protocol == "smcseq":
+        for seq in seqs:
+            counts[categorize_sf_smcseq(seq)] += 1
+        return dict(counts), dict(overlaps)
+
+    for seq in seqs:
+        match_counts = {
+            name: len(SPATIALDMT[name].findall(seq))
+            for name in ("linker1", "linker2", "tn5_me")
+        }
+        if all(n == 0 for n in match_counts.values()):
+            overlaps["all_three_absent"] += 1
+        for name in ("linker1", "linker2", "tn5_me"):
+            if match_counts[name] != 1:
+                counts[name] += 1
+                break
+        else:
+            counts["all_ok"] += 1
+    return dict(counts), dict(overlaps)
+
+
+def _sf_seq_batches(r2_fastq, batch_size):
     opener = gzip.open if r2_fastq.endswith(".gz") else open
+    batch = []
     with opener(r2_fastq, "rt") as f:
         while True:
             h = f.readline()
-            if not h: break
+            if not h:
+                break
             seq = f.readline().rstrip("\n")
             f.readline(); f.readline()
             ## suffix is at the end of qname (before any whitespace)
             qname = h[1:].split(None, 1)[0]
             if qname.rsplit("_", 1)[-1] != "SF":
                 continue
-            if protocol == "smcseq":
-                counts[categorize_sf_smcseq(seq)] += 1
-                continue
+            batch.append(seq)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
 
-            match_counts = {
-                name: len(SPATIALDMT[name].findall(seq))
-                for name in ("linker1", "linker2", "tn5_me")
-            }
-            if all(n == 0 for n in match_counts.values()):
-                overlaps["all_three_absent"] += 1
-            for name in ("linker1", "linker2", "tn5_me"):
-                if match_counts[name] != 1:
-                    counts[name] += 1
-                    break
-            else:
-                counts["all_ok"] += 1
+
+def sf_anchor_breakdown(r2_fastq, protocol, threads=1, batch_size=100000):
+    """For each SF read in the unmatched R2 fastq, classify which structural
+    anchor was the FIRST to fail. Also count Spatial-DMT reads where all three
+    anchors have zero matches. Returns (first_failure_counts, overlap_counts)."""
+    counts = defaultdict(int)
+    overlaps = defaultdict(int)
+
+    threads = max(1, threads)
+    batches = ((protocol, batch) for batch in _sf_seq_batches(r2_fastq, batch_size))
+    pool = None
+    if threads == 1:
+        results = map(_classify_sf_batch, batches)
+    else:
+        pool = mp.Pool(processes=threads)
+        results = pool.imap_unordered(_classify_sf_batch, batches, chunksize=1)
+
+    try:
+        for batch_counts, batch_overlaps in results:
+            _merge_counts(counts, batch_counts)
+            _merge_counts(overlaps, batch_overlaps)
+    except Exception:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+            pool = None
+        raise
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
     return counts, overlaps
 
 
@@ -275,10 +324,16 @@ def main():
     ap.add_argument("--out",      required=True, help="long-format raw TSV")
     ap.add_argument("--mqc-summary", required=True,
                     help="MultiQC custom-content TSV: combined unmatched summary")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="worker processes for SF anchor classification")
+    ap.add_argument("--batch-size", type=int, default=100000,
+                    help="SF reads per worker batch")
     args = ap.parse_args()
 
-    align = bam_align_stats(args.bam)
-    sf_breakdown, sf_overlaps = sf_anchor_breakdown(args.r2_fastq, args.protocol)
+    align = bam_align_stats(args.bam, threads=args.threads)
+    sf_breakdown, sf_overlaps = sf_anchor_breakdown(
+        args.r2_fastq, args.protocol, threads=args.threads,
+        batch_size=args.batch_size)
 
     with open(args.out, "w") as f:
         f.write("section\tkey\tvalue\n")
