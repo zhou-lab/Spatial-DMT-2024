@@ -982,6 +982,7 @@ rule qc_report:
         biscuit_qc     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_mapq_table.txt",
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         trim_stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
+        lambda_flagstat = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
         cg             = WORKDIR + "/{sample}/pileup/{sample}.cg",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
         ## Unmatched-track diagnostic _mqc, also lands in qc/biscuit_qc_merged/.
@@ -1013,6 +1014,7 @@ rule qc_report:
             --trim-stats       {input.trim_stats} \
             --spatial-counts   {input.spatial_counts} \
             --chromhmm-summary {output.chromhmm_sum} \
+            --lambda-flagstat  {input.lambda_flagstat} \
             --sample           {wildcards.sample} \
             --output-dir       {WORKDIR}/{wildcards.sample}/qc/table/
         RNA_DIRS=""

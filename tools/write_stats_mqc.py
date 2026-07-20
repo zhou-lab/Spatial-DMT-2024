@@ -7,19 +7,40 @@ Reads:
   - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, WL_unmatched, ...)
   - {sample}_spatial_barcode_counts.tsv (per-barcode: barcode, x, y, dna_reads, ...)
   - {sample}_chromhmm_summary.tsv (yame summary output)
+  - optional lambda BAM flagstat; if supplied, genomic read pairs are
+    Reads_total minus lambda pairs with both mates mapped.
 
 Writes:
   - {output_dir}/{sample}_stats_mqc.tsv  (MultiQC generalstats)
 """
 import argparse
 import os
+import re
 
 
-def genomic_total(stats):
+def lambda_both_mapped_pairs(flagstat_path):
+    """Return lambda read pairs where both mates mapped from samtools flagstat."""
+    if not flagstat_path:
+        return None
+    try:
+        with open(flagstat_path) as handle:
+            for line in handle:
+                m = re.match(r'^(\d+)\s+\+\s+\d+\s+with itself and mate mapped$', line.rstrip())
+                if m:
+                    return int(m.group(1)) // 2
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def genomic_total(stats, lambda_flagstat=None):
     """DNA read pairs excluding the barcode85/lambda bucket."""
+    n_total = stats.get('Reads_total')
+    lambda_pairs = lambda_both_mapped_pairs(lambda_flagstat)
+    if n_total is not None and lambda_pairs is not None:
+        return max(0, n_total - lambda_pairs)
     if stats.get('Reads_detected') is not None:
         return stats['Reads_detected']
-    n_total = stats.get('Reads_total')
     if n_total is None:
         return None
     for key in ('Reads_barcode85', 'Reads_written_barcode85'):
@@ -33,6 +54,8 @@ def main():
     p.add_argument('--trim-stats',       required=True)
     p.add_argument('--spatial-counts',   required=True)
     p.add_argument('--chromhmm-summary', required=True)
+    p.add_argument('--lambda-flagstat',
+                   help='samtools flagstat for lambda BAM; uses pairs with both mates mapped as temporary control subtraction')
     p.add_argument('--sample',           required=True)
     p.add_argument('--output-dir',       required=True)
     args = p.parse_args()
@@ -58,7 +81,7 @@ def main():
                 except ValueError:
                     pass
 
-    n_total = genomic_total(stats)
+    n_total = genomic_total(stats, args.lambda_flagstat)
     n_assigned = stats.get('Reads_passed')
     n_wl_miss = stats.get('WL_unmatched', stats.get('Unmatched_WM', 0))
     n_linkers = None if n_assigned is None else n_assigned + n_wl_miss
