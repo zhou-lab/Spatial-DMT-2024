@@ -8,6 +8,7 @@ Inputs:
   --rna-counts       Optional TSV with per-barcode RNA UMI/gene counts
   --rna-summary      Optional STARsolo GeneFull/Summary.csv
   --multiqc-html     Path to multiqc_report.html (linked, not embedded)
+  --curated-metrics  Optional curated metrics _mqc.tsv used for pre-filter mapping
   --sample           Sample name
   --output           Output HTML path
 """
@@ -57,7 +58,28 @@ def img_to_b64(path):
         return base64.b64encode(f.read()).decode()
 
 
-def compute_dna_summary(spatial_counts_path):
+def read_curated_metrics(path):
+    header = None
+    with open(path) as handle:
+        for line in handle:
+            line = line.rstrip('\n')
+            if not line or line.startswith('#'):
+                continue
+            if header is None:
+                header = line.split('\t')
+                continue
+            return dict(zip(header, line.split('\t')))
+    return {}
+
+
+def metric_float(metrics, key):
+    try:
+        return float(metrics.get(key, ''))
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_dna_summary(spatial_counts_path, curated_metrics_path=None):
     df = pd.read_csv(spatial_counts_path, sep='\t')
     df['dna_reads']    = pd.to_numeric(df['dna_reads'],    errors='coerce').fillna(0)
     df['mapped_reads'] = pd.to_numeric(df.get('mapped_reads', 0), errors='coerce').fillna(0)
@@ -72,14 +94,32 @@ def compute_dna_summary(spatial_counts_path):
     map_rate      = total_mapped / total_reads if total_reads else 0.0
     dup_rate      = total_dup / total_mapped if total_mapped else 0.0
 
-    return {
-        'Total DNA reads (demux)': f'{total_reads:,}',
+    summary = {
+        'DNA reads in QC BAM': f'{total_reads:,}',
         'Designed spatial barcodes': f'{n_designed:,}',
         'Barcodes with ≥1 read': f'{n_covered:,} ({n_covered/n_designed*100:.1f}%)',
         'Median reads (covered barcodes)': f'{med_reads:.0f}',
         'Overall mapping rate': f'{map_rate*100:.1f}%',
         'Overall duplication rate': f'{dup_rate*100:.1f}%',
     }
+    if curated_metrics_path and os.path.exists(curated_metrics_path):
+        curated = read_curated_metrics(curated_metrics_path)
+        pre_reads = metric_float(curated, 'num_reads_merged')
+        pre_mapped = metric_float(curated, 'num_mapped_merged')
+        pre_map_rate = metric_float(curated, 'mapping_rate_merged')
+        qc_reads = metric_float(curated, 'num_reads_qc_bam')
+        bsconv_retained = metric_float(curated, 'bsconv_retained_fraction')
+        if pre_reads is not None:
+            summary['Pre-filter DNA reads'] = f'{pre_reads:.3f} M'
+        if pre_mapped is not None:
+            summary['Pre-filter mapped reads'] = f'{pre_mapped:.3f} M'
+        if pre_map_rate is not None:
+            summary['Overall mapping rate'] = f'{pre_map_rate*100:.1f}%'
+        if qc_reads is not None:
+            summary['DNA reads in QC BAM'] = f'{qc_reads:.3f} M'
+        if bsconv_retained is not None:
+            summary['BSCONV retained'] = f'{bsconv_retained*100:.1f}%'
+    return summary
 
 
 def read_star_summary(path):
@@ -224,6 +264,7 @@ def main():
     parser.add_argument('--sample', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--multiqc-html', default='')
+    parser.add_argument('--curated-metrics', default='')
     parser.add_argument('--protocol', choices=['spatialdmt', 'smcseq'], default='spatialdmt')
     parser.add_argument('--trim-stats', required=True)
     parser.add_argument('--unmatched-diagnostics', required=True)
@@ -245,7 +286,7 @@ def main():
     ]
     if any(rna_diagnostic_paths) and not all(rna_diagnostic_paths):
         parser.error('All RNA diagnostic input arguments must be supplied together')
-    dna_summary = compute_dna_summary(args.spatial_counts)
+    dna_summary = compute_dna_summary(args.spatial_counts, args.curated_metrics)
     rna_summary = (
         compute_rna_summary(args.rna_counts, args.rna_summary)
         if args.rna_counts

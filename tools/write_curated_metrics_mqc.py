@@ -9,9 +9,11 @@ cell-aware dedup. Per-cell metrics live in the spatial-map qc_report.html,
 not here.
 
 Columns (suffix encodes source so the tooltip is self-documenting):
-  num_reads_merged              merged-BAM flagstat "in total"
-  num_mapped_merged             merged-BAM flagstat "mapped" (primary)
-  mapping_rate_merged           derived
+  num_reads_merged              pre-filter merged-BAM primary reads
+  num_mapped_merged             pre-filter merged-BAM primary mapped reads
+  mapping_rate_merged           derived from pre-filter primary reads
+  num_reads_qc_bam              primary reads in the BAM used for methylation QC
+  bsconv_retained_fraction      retained fraction if a bsconv-filtered BAM exists
   dup_rate_dupsifter            dupsifter -B stats (cell-aware dup signature)
   num_mapped_lambda             lambda flagstat mapped
   lambda_retention_yame         yame summary lambda .cg -- mean beta over
@@ -36,6 +38,8 @@ Usage:
     python write_curated_metrics_mqc.py \\
         --sample E65_20um \\
         --merged-flagstat ... \\
+        --pre-filter-flagstat ... \\
+        --bsconv-log ... \\
         --merged-dupstat ... \\
         --biscuit-conv ... \\
         --cg ... \\
@@ -58,18 +62,27 @@ HEADER = """\
 # format: 'tsv'
 # headers:
 #     num_reads_merged:
-#         title: 'Reads (merged)'
-#         description: 'Total reads in the merged dedup BAM (samtools flagstat "in total"). Includes both R1 and R2 of paired reads.'
+#         title: 'Reads (pre-filter)'
+#         description: 'Primary reads in the pre-conversion-filter merged dedup BAM (samtools flagstat "primary"). This is the denominator for the reported mapping rate.'
 #         format: '{:,.1f}'
 #         suffix: ' M'
 #     num_mapped_merged:
-#         title: 'Mapped'
-#         description: 'Primary mapped reads in the merged dedup BAM (samtools flagstat "mapped"). Excludes secondary/supplementary.'
+#         title: 'Mapped (pre-filter)'
+#         description: 'Primary mapped reads in the pre-conversion-filter merged dedup BAM (samtools flagstat "primary mapped"). Excludes secondary/supplementary.'
 #         format: '{:,.1f}'
 #         suffix: ' M'
 #     mapping_rate_merged:
 #         title: 'Mapping rate'
-#         description: 'num_mapped_merged / num_reads_merged.'
+#         description: 'Primary mapped reads divided by primary reads in the pre-conversion-filter merged dedup BAM. For smcseq this is before biscuit bsconv removes unmapped/high-CpH-retention reads.'
+#         format: '{:.1%}'
+#     num_reads_qc_bam:
+#         title: 'Reads (QC BAM)'
+#         description: 'Primary reads in the BAM used for methylation QC and pileup. For smcseq this is the post-bsconv BAM; for spatialdmt this is the merged dedup BAM.'
+#         format: '{:,.1f}'
+#         suffix: ' M'
+#     bsconv_retained_fraction:
+#         title: 'BSCONV retained'
+#         description: 'Fraction of reads retained by biscuit bsconv when a bsconv log or post-filter flagstat is available. Empty means no bsconv conversion filter was run.'
 #         format: '{:.1%}'
 #     dup_rate_dupsifter:
 #         title: 'Duplication rate'
@@ -114,8 +127,13 @@ HEADER = """\
 
 
 def parse_flagstat(path):
-    """Return (total_reads, mapped_primary) from samtools flagstat output."""
-    total = mapped = 0
+    """Return key read counts from samtools flagstat output."""
+    metrics = {
+        'total': 0,
+        'primary': 0,
+        'mapped': 0,
+        'primary_mapped': 0,
+    }
     with open(path) as f:
         for line in f:
             m = re.match(r'^(\d+)\s+\+\s+\d+\s+(.*)', line)
@@ -123,12 +141,33 @@ def parse_flagstat(path):
                 continue
             n, label = int(m.group(1)), m.group(2)
             if label.startswith('in total'):
-                total = n
+                metrics['total'] = n
+            elif label.startswith('primary mapped'):
+                metrics['primary_mapped'] = n
+            elif label == 'primary':
+                metrics['primary'] = n
             elif label.startswith('mapped (') or label == 'mapped':
-                ## first "mapped" line (primary); flagstat lists primary mapped first
-                if mapped == 0:
-                    mapped = n
-    return total, mapped
+                metrics['mapped'] = n
+    if metrics['primary'] == 0:
+        metrics['primary'] = metrics['total']
+    if metrics['primary_mapped'] == 0:
+        metrics['primary_mapped'] = metrics['mapped']
+    return metrics
+
+
+def parse_bsconv_log(path):
+    """Return (processed, retained, retained_fraction) from biscuit bsconv stderr."""
+    if not path:
+        return 0, 0, float('nan')
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return 0, 0, float('nan')
+    m = re.search(r'Processed\s+(\d+)\s+reads,\s+(\d+)\s+\(([0-9.]+)%\)\s+remains', text)
+    if not m:
+        return 0, 0, float('nan')
+    processed, retained = int(m.group(1)), int(m.group(2))
+    return processed, retained, retained / processed if processed else float('nan')
 
 
 def parse_dupsifter(path):
@@ -214,6 +253,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--sample',          required=True)
     p.add_argument('--merged-flagstat', required=True)
+    p.add_argument('--pre-filter-flagstat')
+    p.add_argument('--bsconv-log')
     p.add_argument('--merged-dupstat',  required=True)
     p.add_argument('--biscuit-conv',    required=True)
     p.add_argument('--cg',              required=True)
@@ -222,25 +263,36 @@ def main():
     p.add_argument('--output',          required=True)
     args = p.parse_args()
 
-    total, mapped       = parse_flagstat(args.merged_flagstat)
+    pre_flagstat = args.pre_filter_flagstat or args.merged_flagstat
+    pre_metrics         = parse_flagstat(pre_flagstat)
+    qc_metrics          = parse_flagstat(args.merged_flagstat)
     dup_rate            = parse_dupsifter(args.merged_dupstat)
     ca, cc, cg, ct      = parse_biscuit_conv(args.biscuit_conv)
-    lam_total, lam_map  = parse_flagstat(args.lambda_flagstat)
+    lam_metrics         = parse_flagstat(args.lambda_flagstat)
     nq,  depth, _       = yame_summary(args.cg, aggregate_cells=True)
     _,   _,     lam_beta = yame_summary(args.lambda_cg)
 
+    total = pre_metrics['primary']
+    mapped = pre_metrics['primary_mapped']
     map_rate = (mapped / total) if total else 0.0
+    qc_total = qc_metrics['primary']
+    _, _, bsconv_retained = parse_bsconv_log(args.bsconv_log)
+    if bsconv_retained != bsconv_retained and args.pre_filter_flagstat:
+        bsconv_retained = qc_total / total if total else float('nan')
+    bsconv_retained_str = '' if bsconv_retained != bsconv_retained else f'{bsconv_retained:.6f}'
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, 'w') as f:
         f.write(HEADER)
         f.write('Sample\tnum_reads_merged\tnum_mapped_merged\tmapping_rate_merged\t'
+                'num_reads_qc_bam\tbsconv_retained_fraction\t'
                 'dup_rate_dupsifter\tnum_mapped_lambda\tlambda_retention_yame\t'
                 'cpg_coverage_yame\tcpg_depth_yame\t'
                 'CA_retention_biscuitqc\tCC_retention_biscuitqc\t'
                 'CG_retention_biscuitqc\tCT_retention_biscuitqc\n')
         f.write(f'{args.sample}\t{total/1e6:.3f}\t{mapped/1e6:.3f}\t{map_rate:.6f}\t'
-                f'{dup_rate:.6f}\t{lam_map/1e6:.3f}\t{lam_beta:.6f}\t'
+                f'{qc_total/1e6:.3f}\t{bsconv_retained_str}\t'
+                f'{dup_rate:.6f}\t{lam_metrics["primary_mapped"]/1e6:.3f}\t{lam_beta:.6f}\t'
                 f'{nq/1e6:.3f}\t{depth:.3f}\t'
                 f'{ca:.6e}\t{cc:.6e}\t{cg:.6f}\t{ct:.6e}\n')
 

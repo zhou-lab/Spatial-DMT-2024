@@ -869,7 +869,8 @@ rule mqc_unmatched_diagnostics:
         """
 
 ## Sample-level curated metrics table -- the canonical sample-row in MultiQC.
-## Pulls from: merged BAM flagstat (reads, mapped), dupsifter.stat (dup_rate),
+## Pulls from: pre-filter merged BAM flagstat (reads, mapped), the QC BAM
+## flagstat (post-bsconv for smcseq), dupsifter.stat (dup_rate),
 ## sample-level biscuit qc on merged BAM (CA/CC/CT conversion), yame summary on
 ## {sample}.cg (cpg_coverage, cpg_depth, cpg_meth), lambda align/pileup (lambda
 ## mapped, lambda methylation retention). Emits a custom-content _mqc.tsv with
@@ -879,6 +880,7 @@ rule mqc_curated:
     input:
         merged_bam       = DNA_QC_MERGED_BAM,
         merged_flagstat  = DNA_QC_MERGED_FLAGSTAT,
+        pre_filter_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         merged_dupstat   = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         biscuit_conv     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
         cg               = WORKDIR + "/{sample}/pileup/{sample}.cg",
@@ -890,11 +892,19 @@ rule mqc_curated:
         mem = "4G",
         time = "1:00:00",
         cpus_per_task = 1,
+    params:
+        bsconv_log_arg = lambda wc: (
+            f"--bsconv-log {WORKDIR}/{wc.sample}/bam_merged/{wc.sample}.bsconv.log"
+            if PROTOCOL == "smcseq"
+            else ""
+        ),
     shell:
         """
         {PYTHON} {workflow.basedir}/../tools/write_curated_metrics_mqc.py \
             --sample           {wildcards.sample} \
             --merged-flagstat  {input.merged_flagstat} \
+            --pre-filter-flagstat {input.pre_filter_flagstat} \
+            {params.bsconv_log_arg} \
             --merged-dupstat   {input.merged_dupstat} \
             --biscuit-conv     {input.biscuit_conv} \
             --cg               {input.cg} \
@@ -1024,6 +1034,7 @@ rule qc_report:
             --plots-dir      {WORKDIR}/{wildcards.sample}/qc/plots/ \
             --sample         {wildcards.sample} \
             --multiqc-html   {output.multiqc} \
+            --curated-metrics {input.curated_mqc} \
             --protocol       {PROTOCOL} \
             {params.report_rna_args} \
             --trim-stats            {input.trim_stats} \

@@ -304,7 +304,7 @@ QC rules are named by their **consumer**: `mqc_*` produce inputs to MultiQC (eit
 **MultiQC inputs (matched track):**
 
 - `mqc_biscuit` — One `tools/spatialmeth_qc.sh` invocation on the merged dedup BAM (sample-level — not per-cell). Emits `biscuit qc` tables (mapq, strand, dup, CpH/CpG retention by read pos). Does NOT pileup — the conversion-rate table is produced by `dna_biscuit_pileup` from the per-cell VCFs (single pileup per cell, never twice). covdist/cv intentionally NOT produced — see `spatialmeth_qc.sh` header note on contig mismatch.
-- `mqc_curated` — Sample-level curated MultiQC custom-content table (13 cols: Sample, reads/mapped/mapping rate from flagstat, dup rate from dupsifter `-B` stats, lambda mapped + retention, CpG coverage/depth from yame summary on `{sample}.cg`, and CA/CC/CG/CT retention from the pooled per-cell pileup VCFs — CG is the genuine CpG methylation signal, CA/CC/CT are residual non-CpG retention ≈ 0 for complete bisulfite conversion). See `tools/write_curated_metrics_mqc.py`. Mirrors the Ultima WGBS `final_report` curated-metrics pattern.
+- `mqc_curated` — Sample-level curated MultiQC custom-content table (Sample, pre-filter reads/mapped/mapping rate from the merged BAM flagstat, QC-BAM reads and bsconv-retained fraction when applicable, dup rate from dupsifter `-B` stats, lambda mapped + retention, CpG coverage/depth from yame summary on `{sample}.cg`, and CA/CC/CG/CT retention from the pooled per-cell pileup VCFs — CG is the genuine CpG methylation signal, CA/CC/CT are residual non-CpG retention ≈ 0 for complete bisulfite conversion). See `tools/write_curated_metrics_mqc.py`. Mirrors the Ultima WGBS `final_report` curated-metrics pattern.
 
 **MultiQC inputs (unmatched track):**
 
