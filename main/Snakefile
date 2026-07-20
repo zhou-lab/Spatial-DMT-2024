@@ -1030,7 +1030,7 @@ rule qc_report:
             --filename multiqc_report.html \
             --force \
             --exclude star \
-            --cl-config "sample_names_replace: {{rna_STAR: {wildcards.sample}}}"
+            --cl-config "sample_names_replace: {{rna_STAR: {wildcards.sample}}}, table_columns_visible: {{biscuit: {{aligned: false}}}}"
         {PYTHON} {workflow.basedir}/../tools/generate_html_report.py \
             --spatial-counts {input.spatial_counts} \
             --plots-dir      {WORKDIR}/{wildcards.sample}/qc/plots/ \
