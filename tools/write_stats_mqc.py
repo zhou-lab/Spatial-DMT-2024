@@ -5,7 +5,7 @@ and bulk ChromHMM methylation levels (TssA, Tx) derived from a yame summary file
 
 Reads:
   - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, WL_unmatched, ...)
-  - {sample}_spatial_barcode_counts.tsv (per-barcode: barcode, x, y, dna_reads, ...)
+  - {sample}_spatial_barcode_counts.tsv (legacy fallback for the designed count)
   - {sample}_chromhmm_summary.tsv (yame summary output)
   - optional lambda BAM flagstat; if supplied, genomic read pairs are
     Reads_total minus lambda pairs with both mates mapped.
@@ -70,19 +70,22 @@ def main():
                 except ValueError:
                     pass
 
-    n_designed = 0
+    n_designed_from_spatial = 0
     with open(args.spatial_counts) as f:
         f.readline()  # skip header
         for line in f:
             parts = line.strip().split('\t')
             if len(parts) >= 4:
                 try:
-                    n_designed += int(parts[3])  # dna_reads column
+                    n_designed_from_spatial += int(parts[3])  # dna_reads column
                 except ValueError:
                     pass
 
     n_total = genomic_total(stats, args.lambda_flagstat)
     n_assigned = stats.get('Reads_passed')
+    # Reads_passed is the pre-alignment whitelist-assigned count. Spatial
+    # counts may be post-bsconv and therefore must not define barcode yield.
+    n_designed = n_assigned if n_assigned is not None else n_designed_from_spatial
     n_wl_miss = stats.get('WL_unmatched', stats.get('Unmatched_WM', 0))
     n_linkers = None if n_assigned is None else n_assigned + n_wl_miss
 
