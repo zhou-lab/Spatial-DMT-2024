@@ -171,6 +171,10 @@ rule final_output:
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
 ## invocations per sample.
 DUPSIFTER = config.get("DUPSIFTER", "/mnt/isilon/zhoulab/labbin/dupsifter")
+YAME = config.get(
+    "YAME",
+    "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/yame",
+)
 SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
 SMCSEQ_BSCONV_ARGS = config.get("SMCSEQ_BSCONV_ARGS", "-m 2")
 if PROTOCOL == "smcseq":
@@ -426,42 +430,81 @@ rule dna_biscuit_pileup:
                 bam={{}}
                 barcode=$(basename "$bam" .bam)
                 out_vcf="$tmp_pileup/$barcode.vcf.gz"
-                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" {params.ref_fasta} "$bam" | \
-                    bgzip -c > "$out_vcf"
-                tabix -p vcf "$out_vcf"
+                if [[ -s "$out_vcf" && -s "$out_vcf.tbi" ]] && \
+                        tabix -l "$out_vcf" >/dev/null 2>&1; then
+                    exit 0
+                fi
+                raw_vcf="$tmp_pileup/$barcode.raw.vcf.$$"
+                tmp_vcf="$out_vcf.tmp.$$"
+                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" {params.ref_fasta} "$bam" \
+                    > "$raw_vcf"
+                {{
+                    awk '"'"'/^#/ {{ print }}'"'"' "$raw_vcf"
+                    awk '"'"'!/^#/ {{ print }}'"'"' "$raw_vcf" | \
+                        LC_ALL=C sort -k1,1V -k2,2n
+                }} | bgzip -c > "$tmp_vcf"
+                tabix -p vcf "$tmp_vcf"
+                mv "$tmp_vcf" "$out_vcf"
+                mv "$tmp_vcf.tbi" "$out_vcf.tbi"
+                rm -f "$raw_vcf"
             '
 
         ## Per-cell processing: emit the cell's .cg AND its CA/CC/CG/CT
         ## conversion summary (context\\tbeta_sum\\tbeta_cnt) in one parallel
         ## pass. The .conv.tsv files stay on disk under tmp/pileup/ -- usable
         ## by future per-cell spatial-conversion heatmaps without re-pileup.
+        expected_cpg_rows=$(zcat {params.cpg_bed} | wc -l)
+        export expected_cpg_rows
         process_cell() {{
-            local vcf=$1 base
+            local vcf=$1 base out_dir cg_out conv_out cg_tmp conv_tmp actual_rows
             base=$(basename "$vcf" .vcf.gz)
+            out_dir=$(dirname "$vcf")
+            cg_out="$out_dir/$base.cg"
+            conv_out="$out_dir/$base.conv.tsv"
+            if [[ -s "$cg_out" && -e "$conv_out" ]]; then
+                actual_rows=$({YAME} info "$cg_out" | awk -F"\\t" 'NR == 2 {{ print $4 }}')
+                if [[ "$actual_rows" == "$expected_cpg_rows" ]]; then
+                    return 0
+                fi
+            fi
+            cg_tmp="$cg_out.tmp.$$"
+            conv_tmp="$conv_out.tmp.$$"
             biscuit vcf2bed -k 1 -t cg "$vcf" | cut -f1-5 | \
                 LC_ALL=C sort -k1,1 -k2,2n | \
                 biscuit mergecg {params.ref_fasta} - | \
                 bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
                 awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
                     -e '{{ M=round($7*$8); print M,$8-M;}}' | \
-                yame pack -f 3 - > "$(dirname $vcf)/$base.cg"
+                {YAME} pack -f 3 - > "$cg_tmp"
+            actual_rows=$({YAME} info "$cg_tmp" | awk -F"\\t" 'NR == 2 {{ print $4 }}')
+            if [[ "$actual_rows" != "$expected_cpg_rows" ]]; then
+                echo "Invalid CpG dimensions for $base: $actual_rows != $expected_cpg_rows" >&2
+                rm -f "$cg_tmp" "$conv_tmp"
+                return 1
+            fi
+            : > "$conv_tmp"
             biscuit vcf2bed -e -t c "$vcf" | \
-                awk -F"\\t" -v out="$(dirname $vcf)/$base.conv.tsv" '
+                awk -F"\\t" -v out="$conv_tmp" '
                     {{ sum[$6] += $8; cnt[$6] += 1 }}
                     END {{
                         for (c in sum) printf "%s\\t%.6f\\t%d\\n", c, sum[c], cnt[c] > out
                     }}'
+            mv "$cg_tmp" "$cg_out"
+            mv "$conv_tmp" "$conv_out"
         }}
         export -f process_cell
-        parallel -j {resources.cpus_per_task} \
+        parallel --halt soon,fail=1 -j {resources.cpus_per_task} \
             'process_cell {{}}' ::: $tmp_pileup/*.vcf.gz
 
-        :>{output.cg}
-        for cg_file in $tmp_pileup/*.cg; do
-            barcode=$(basename $cg_file .cg)
-            cat $cg_file >> {output.cg}
-            yame index -1 $barcode {output.cg}
+        cg_samples="$tmp_pileup/{wildcards.sample}.cg.samples"
+        : > {output.cg}
+        : > "$cg_samples"
+        for cg_file in "$tmp_pileup"/*.cg; do
+            barcode=$(basename "$cg_file" .cg)
+            cat "$cg_file" >> {output.cg}
+            printf '%s\n' "$barcode" >> "$cg_samples"
         done
+        {YAME} index -s "$cg_samples" {output.cg}
 
         ## Sample-level CA/CC/CG/CT = record-pooled mean across per-cell
         ## conversion files (each cell contributed beta_sum + beta_cnt above;
@@ -547,7 +590,7 @@ rule dna_biscuit_pileup_lambda:
         allc = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda_allc.bed",
         cg   = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
     resources:
-        mem = "20G",
+        mem = config.get("LAMBDA_PILEUP_MEM", "64G"),
         time = "24:00:00",
         cpus_per_task = 4,
     shell:
@@ -565,7 +608,7 @@ rule dna_biscuit_pileup_lambda:
             bedtools intersect -a {LAMBDA_CPG_BED} -b - -sorted -loj | \
             awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
                 -e '{{ M=round($7*$8); print M,$8-M;}}' | \
-            yame pack -f 3 - > {output.cg}
+            {YAME} pack -f 3 - > {output.cg}
         """
 
 ## Unmatched-track alignment: structure-pass + whitelist-miss reads from
@@ -583,12 +626,13 @@ rule dna_biscuit_align_unmatched:
         flagstat = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam.flagstat",
         dup      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.dupsifter.stat",
     resources:
-        mem = "120G",
-        time = "48:00:00",
-        cpus_per_task = 24,
+        mem = config.get("UNMATCHED_ALIGN_MEM", "180G"),
+        time = config.get("UNMATCHED_ALIGN_TIME", "96:00:00"),
+        cpus_per_task = int(config.get("UNMATCHED_ALIGN_CPUS", 48)),
     params:
         biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
         ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+        sort_threads  = int(config.get("UNMATCHED_SORT_CPUS", 12)),
     shell:
         """
         set -xeo pipefail
@@ -596,7 +640,7 @@ rule dna_biscuit_align_unmatched:
         biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} \
             {input.r2} {input.r1} \
         | {DUPSIFTER} --stats-output {output.dup} {params.ref_fasta} - \
-        | samtools sort -@ 24 -T {output.bam}_tmp -O bam -o {output.bam} -
+        | samtools sort -@ {params.sort_threads} -T {output.bam}_tmp -O bam -o {output.bam} -
         samtools index {output.bam}
         samtools flagstat {output.bam} > {output.flagstat}
         """
@@ -659,6 +703,7 @@ else:
         output:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
+            stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.primer.txt",
         resources:
             mem = "20G",
             time = "12:00:00",
@@ -671,7 +716,7 @@ else:
             in1={input.in1} in2={input.in2} \
             outm1={output.out1} outm2={output.out2} \
             k=22 mm=f rcomp=f restrictleft=30 skipr1=t hdist=2 \
-            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.primer.txt \
+            stats={output.stats} \
             threads={resources.cpus_per_task} \
             literal=CAAGCGTTGGCTTCTCGCATCT
             """
@@ -683,6 +728,7 @@ else:
         output:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
+            stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker1.txt",
         resources:
             mem = "20G",
             time = "12:00:00",
@@ -693,7 +739,7 @@ else:
             in1={input.in1} in2={input.in2} \
             outm1={output.out1} outm2={output.out2} \
             k=30 mm=f rcomp=f restrictleft=108 skipr1=t hdist=3 \
-            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker1.txt \
+            stats={output.stats} \
             threads={resources.cpus_per_task} \
             literal=GTGGCCGATGTTTCGCATCGGCGTACGACT
             """
@@ -705,6 +751,7 @@ else:
         output:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
+            stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker2.txt",
         resources:
             mem = "20G",
             time = "12:00:00",
@@ -715,7 +762,7 @@ else:
             in1={input.in1} in2={input.in2} \
             outm1={output.out1} outm2={output.out2} \
             k=30 mm=f rcomp=f restrictleft=70 skipr1=t hdist=3 \
-            stats={WORKDIR}/{wildcards.sample}/rna_bbduk/{wildcards.sample}_stats.linker2.txt \
+            stats={output.stats} \
             threads={resources.cpus_per_task} \
             literal=ATCCACGTGCTTGAGAGGCCAGAGCATTCG
             """
@@ -852,7 +899,7 @@ rule mqc_unmatched_diagnostics:
         mqc_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
     resources:
         mem = "8G",
-        time = "4:00:00",
+        time = config.get("UNMATCHED_DIAGNOSTICS_TIME", "12:00:00"),
         cpus_per_task = 24,
     shell:
         """
@@ -910,6 +957,7 @@ rule mqc_curated:
             --cg               {input.cg} \
             --lambda-flagstat  {input.lambda_flagstat} \
             --lambda-cg        {input.lambda_cg} \
+            --yame             {YAME} \
             --output           {output.mqc}
         """
 
@@ -933,6 +981,7 @@ rule spatial_summary:
     resources:
         mem = "12G",
         cpus_per_task = 4,
+        time = "24:00:00",
     shell:
         """
         {PYTHON} {workflow.basedir}/../tools/barcode_summary.py \
@@ -1007,8 +1056,8 @@ rule qc_report:
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/html/
         
         # Explicitly aggregate methylation levels for TssA and Tx
-        yame rowop -o musum {input.cg} | \
-            yame summary -m {CHROMHMM_CM} - > {output.chromhmm_sum}
+        {YAME} rowop -o musum {input.cg} | \
+            {YAME} summary -m {CHROMHMM_CM} - > {output.chromhmm_sum}
 
         {PYTHON} {workflow.basedir}/../tools/write_stats_mqc.py \
             --trim-stats       {input.trim_stats} \
@@ -1063,8 +1112,8 @@ rule spatial_features:
         tmp={WORKDIR}/{wildcards.sample}/qc/tmp/features_{wildcards.feat}/
         rm -rf $tmp && mkdir -p $tmp
         cut -f1 {input.cg}.idx | parallel -j {resources.cpus_per_task} \
-            'yame subset {input.cg} {{}} | \
-                yame summary -q {{}} -m {FEATURE_CM_DIR}/{wildcards.feat}.cm - | \
+            '{YAME} subset {input.cg} {{}} | \
+                {YAME} summary -q {{}} -m {FEATURE_CM_DIR}/{wildcards.feat}.cm - | \
                 gzip -c > '"$tmp"'/{{}}.txt.gz'
         zcat $tmp/*.txt.gz | awk 'NR==1 || $1 != "QFile"' | gzip -c > {output.txt}
         rm -rf $tmp
@@ -1173,16 +1222,19 @@ rule biscuit_pileup_allc:
             biscuit vcf2bed -k 1 -t c {{}} | \
                 LC_ALL=C sort -k1,1 -k2,2n -T $tmp_pileup > $tmp_pileup/allc_$barcode.bed
             bedtools intersect -a {params.allc_bed} -b $tmp_pileup/allc_$barcode.bed -sorted -loj | \
-                cut -f1,2,3,10,11 | BetaCov2MU | yame pack -f 3 - > $tmp_pileup/$barcode.allc
+                cut -f1,2,3,10,11 | BetaCov2MU | {YAME} pack -f 3 - > $tmp_pileup/$barcode.allc
             rm -f $tmp_pileup/allc_$barcode.bed
         '
 
-        :>{output.allc}
-        for f in $tmp_pileup/*.allc; do
-            barcode=$(basename $f .allc)
-            cat $f >> {output.allc}
-            yame index -1 $barcode {output.allc}
+        allc_samples="$tmp_pileup/{wildcards.sample}.allc.samples"
+        : > {output.allc}
+        : > "$allc_samples"
+        for f in "$tmp_pileup"/*.allc; do
+            barcode=$(basename "$f" .allc)
+            cat "$f" >> {output.allc}
+            printf '%s\n' "$barcode" >> "$allc_samples"
         done
+        {YAME} index -s "$allc_samples" {output.allc}
         """
 
 # Per-barcode mean non-CpG methylation summarized over genomic features.

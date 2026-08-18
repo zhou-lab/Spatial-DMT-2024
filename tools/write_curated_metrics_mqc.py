@@ -14,7 +14,8 @@ Columns (suffix encodes source so the tooltip is self-documenting):
   mapping_rate_merged           derived from pre-filter primary reads
   num_reads_qc_bam              primary reads in the BAM used for methylation QC
   bsconv_retained_fraction      retained fraction if a bsconv-filtered BAM exists
-  dup_rate_dupsifter            dupsifter -B stats (cell-aware dup signature)
+  dup_rate_dupsifter            dupsifter -B duplicate primary records /
+                                individual records processed
   num_mapped_lambda             lambda flagstat mapped
   lambda_retention_yame         yame summary lambda .cg -- mean beta over
                                 lambda CpGs (smcseq: full-fastq aligned to
@@ -23,7 +24,7 @@ Columns (suffix encodes source so the tooltip is self-documenting):
                                 reads, near 0 = good bisulfite conversion)
   cpg_coverage_yame             covered CpGs (M+U > 0) after summing all
                                 indexed cells in {sample}.cg
-  cpg_depth_yame                mean M+U over covered CpGs after cell summing
+  cpg_depth_yame                aggregate depth from yame summary after cell summing
   CA_retention_biscuitqc        mean beta in CA context -- residual non-CpG;
                                 near 0 = complete bisulfite conversion
   CC_retention_biscuitqc        mean beta in CC context -- residual non-CpG
@@ -86,7 +87,7 @@ HEADER = """\
 #         format: '{:.1%}'
 #     dup_rate_dupsifter:
 #         title: 'Duplication rate'
-#         description: 'Cell-aware (dupsifter -B) duplication rate from {sample}_merged_dedup.dupsifter.stat: (fwd_dup + rev_dup) / total_reads_processed. Reflects PCR duplicates collapsed per (CB, position) signature.'
+#         description: 'Cell-aware (dupsifter -B) duplication rate from {sample}_merged_dedup.dupsifter.stat: duplicate primary records / individual records processed. In paired-end mode, a pair for which both mates are duplicate contributes two records. Reflects PCR duplicates collapsed per (CB, position) signature.'
 #         format: '{:.1%}'
 #     num_mapped_lambda:
 #         title: 'Mapped (λ)'
@@ -171,8 +172,12 @@ def parse_bsconv_log(path):
 
 
 def parse_dupsifter(path):
-    """Return dup_rate from dupsifter -B stats: (fwd_dup + rev_dup) / total."""
-    total = dupf = dupr = 0
+    """Return duplicate primary records / individual records processed.
+
+    Paired-end dupsifter reports pairs for which both mates are duplicates in a
+    separate field. Each such pair contributes two duplicate records.
+    """
+    total = both = dupf = dupr = 0
     with open(path) as f:
         for line in f:
             if ':' not in line:
@@ -185,11 +190,13 @@ def parse_dupsifter(path):
             k = key.strip().lower()
             if 'individual reads processed' in k:
                 total = v
+            elif 'both reads marked as duplicates' in k:
+                both = v
             elif 'forward strand marked as duplicates' in k:
                 dupf = v
             elif 'reverse strand marked as duplicates' in k:
                 dupr = v
-    return (dupf + dupr) / total if total else 0.0
+    return (2 * both + dupf + dupr) / total if total else 0.0
 
 
 def parse_biscuit_conv(path):
@@ -212,7 +219,7 @@ def parse_biscuit_conv(path):
            f(d.get('CG', 'nan')), f(d.get('CT', 'nan'))
 
 
-def yame_summary(cg_path, aggregate_cells=False):
+def yame_summary(cg_path, yame='yame', aggregate_cells=False):
     """Return (n_query, depth, beta) from a yame summary first data row.
 
     Header columns (yame summary, 2026): QFile, Query, MFile, Mask, N_univ,
@@ -226,17 +233,21 @@ def yame_summary(cg_path, aggregate_cells=False):
     """
     if aggregate_cells:
         rowop = subprocess.Popen(
-            ['yame', 'rowop', '-o', 'musum', cg_path],
+            [yame, 'rowop', '-o', 'musum', cg_path],
             stdout=subprocess.PIPE,
             text=True,
         )
-        out = subprocess.check_output(['yame', 'summary', '-'], stdin=rowop.stdout, text=True)
+        out = subprocess.check_output(
+            [yame, 'summary', '-'],
+            stdin=rowop.stdout,
+            text=True,
+        )
         rowop.stdout.close()
         rowop_ret = rowop.wait()
         if rowop_ret:
             raise subprocess.CalledProcessError(rowop_ret, rowop.args)
     else:
-        out = subprocess.check_output(['yame', 'summary', cg_path], text=True)
+        out = subprocess.check_output([yame, 'summary', cg_path], text=True)
     lines = [l for l in out.splitlines() if l.strip()]
     if len(lines) < 2:
         return float('nan'), float('nan'), float('nan')
@@ -260,6 +271,7 @@ def main():
     p.add_argument('--cg',              required=True)
     p.add_argument('--lambda-flagstat', required=True)
     p.add_argument('--lambda-cg',       required=True)
+    p.add_argument('--yame',            default='yame')
     p.add_argument('--output',          required=True)
     args = p.parse_args()
 
@@ -269,8 +281,12 @@ def main():
     dup_rate            = parse_dupsifter(args.merged_dupstat)
     ca, cc, cg, ct      = parse_biscuit_conv(args.biscuit_conv)
     lam_metrics         = parse_flagstat(args.lambda_flagstat)
-    nq,  depth, _       = yame_summary(args.cg, aggregate_cells=True)
-    _,   _,     lam_beta = yame_summary(args.lambda_cg)
+    nq,  depth, _       = yame_summary(
+        args.cg,
+        yame=args.yame,
+        aggregate_cells=True,
+    )
+    _,   _,     lam_beta = yame_summary(args.lambda_cg, yame=args.yame)
 
     total = pre_metrics['primary']
     mapped = pre_metrics['primary_mapped']
