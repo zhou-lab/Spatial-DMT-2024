@@ -6,6 +6,10 @@ pipeline. Work was performed in the isolated worktree
 `perf/dna-pipeline-speed-20260818`. Benchmark outputs live under
 `/scr1/users/suc3/20260818_dna_speedopt`; production outputs are never used as
 benchmark destinations. The active `SpMETSLE23DM` job was not modified.
+Follow-up pileup work is isolated in
+`/home/suc3/Lab/Spatial-DMT-2024-pileupopt` on branch
+`perf/pileup-speed-20260820`; its benchmark root is
+`/scr1/users/suc3/20260820_pileup_speedopt`.
 
 ## Scheduler envelope
 
@@ -104,6 +108,7 @@ showing the same backpressure pattern.
 | 9 | Stream pileup directly to bgzip/tabix, convert contexts once, and merge CpG strands without repeated reference loads | Moderate | Adopted | One deep 23DM cell: VCF generation 174 to 88 s; downstream conversion 164 to 94 s; combined 338 to 182 s (1.86x), exact final `.cg` and conversion tables |
 | 10 | Build BAM indexes during sort and thread flagstat | Easy | Adopted | 2M records: sort plus index 22 to 16 s; 2.16-GB BAM flagstat 49 to 26 s, exact records/statistics |
 | 11 | Distribute one sample's pileups across multiple Slurm nodes | Hard | Deferred | Current one-thread-per-cell scheduling uses a single allocation efficiently; cross-node scatter needs atomic collation and full-sample validation |
+| 12 | Map VCF calls through one shared CpG index, jointly call size-balanced BAM batches, and stream directly to YAME | Moderate | Adopted on pileup branch | Exact real outputs; fixed two-core joint batches reduced CPU by 37% at 4x40-MB cells and 22% at 4x80-MB cells |
 
 ## Adopted implementation
 
@@ -283,6 +288,69 @@ no raw VCF, passed tabix validation, and matched fixed legacy `.cg` and
 conversion outputs byte for byte. The native merger also passed malformed
 input, `/dev/full`, synthetic C/G-pair, real-input, and Valgrind checks.
 
+### Indexed direct conversion and size-aware batches
+
+The second pileup pass supersedes the context-BED path above. A native
+converter builds one memory-mapped coordinate index, reads BISCUIT's `CX`,
+`N5`, `CV`, and `BT` fields directly, merges CpG strands with BISCUIT's
+rounding semantics, and writes YAME format 3 without a dense 21.9-million-row
+text expansion. The mm10 index contains 21,867,837 CpGs, occupies 87,473,356
+bytes, and took 4.23 seconds and 91 MB RSS to build.
+
+On retained deep cell 0501, direct conversion took 13.44 seconds versus 94
+seconds for the prior optimized context path, a 7.0x conversion speedup. On a
+shallow cell it took 0.09 versus 25.28 seconds, a 281x speedup. Raw YAME
+records were byte-identical; conversion context sums and counts were exact.
+A 16-sample joint-VCF conversion took 9.39 seconds and reproduced every
+shallow cell exactly.
+
+BISCUIT can call multiple BAMs in one invocation. This amortizes its fixed
+whole-reference work for sparse cells, but a fixed cell count is unsafe for
+dense cells because the union VCF repeats one sample field per covered site.
+The production planner therefore uses both a 16-cell ceiling and a 384-MiB
+aggregate-BAM target. It applies deterministic largest-processing-time
+balancing and keys each manifest by BAM metadata, reference, and pileup
+settings. On the 2,500-cell 23DM layout this creates 397 mostly six- or
+seven-cell batches of about 392-423 MB; on shallow 10D it creates 157 full
+16-cell batches of about 9.4 MB.
+
+Fixed two-core direct-stream measurements establish the byte threshold:
+
+| Inputs | Separate cells wall / CPU | Joint batch wall / CPU | Reduction |
+|---|---:|---:|---:|
+| 4 x about 40-MB BAM | 90.77 / 163.56 s | 56.18 / 102.79 s | 38.1% wall; 37.2% CPU |
+| 4 x about 80-MB BAM | 122.84 / 228.55 s | 96.49 / 178.99 s | 21.4% wall; 21.7% CPU |
+
+A joint call of the four largest 23DM BAMs, about 1.03 GB total, generated its
+VCF in 220 seconds versus 264 seconds for two concurrent independent cells,
+but parsing the 998-MB joint VCF required another 95 seconds. That is beyond
+the useful batching range and motivated the 384-MiB target.
+
+New runs pipe BISCUIT VCF text directly into the converter and publish outputs
+from a staging directory only after the complete pipe succeeds. On the 16
+largest shallow cells this took 44.09 wall seconds and 70.99 CPU-seconds. The
+separate compressed-VCF path took 35.91 seconds to generate plus 9.39 seconds
+to convert and 76.84 CPU-seconds total. Direct streaming therefore saves about
+8% CPU, has similar latency, and avoids the 64-MB batch VCF. It would avoid the
+124 GB of transient VCFs retained by the historical 23DM run.
+
+The runner still consumes valid per-cell VCFs from interrupted or older runs.
+Per-cell outputs must be newer than the BAM, reference, BISCUIT, converter,
+and coordinate index and must report the expected YAME row count. A real
+four-cell Snakemake fixture reproduced its aggregate `.cg`, index, and
+conversion table byte for byte; restart took 1.22 seconds. A forced BISCUIT
+failure returned nonzero and published no final outputs.
+
+Historical 23DM pileup job 17122224 took 3:37:23 at 48 CPUs: VCF generation
+spanned 122 minutes and conversion about 92 minutes. A fixed-input linear
+model from the 160/320-MB direct batches projects the 397 planned batches at
+about 32 minutes with the same 48 CPUs or 23 minutes with 69 CPUs, before
+shared-filesystem allowance. Treat this as a 6.8x same-CPU and 9.4x combined
+algorithm/CPU projection, not a completed full-sample timing; the next full
+23DM-class run must replace the model with Slurm accounting. Historical
+shallow 10D took 2:21:00 at 20 CPUs, while the conservative largest-batch
+fixture projects about 12 minutes at the same allocation.
+
 ### Short alignment and BAM-tail measurements
 
 On the fixed 10M-pair real 21DM unmatched subset, assigning all available CPUs
@@ -368,6 +436,9 @@ projections. Projected rows are planning ranges, not completed 21DM timings.
 | Dupsifter, 438.8M records | 6,474 s | 1,144 s | 5.66x; 5,330 s | full-signature hash and uncompressed BAM transport |
 | BAM split, 6.1M records/2,500 cells | 89.77 s | 15.56 s | 5.77x; 74.21 s | bounded bucket fan-out in C/HTSlib |
 | Deep-cell VCF plus conversion | 338 s | 182 s | 1.86x; 46.2% | direct compression, one decode, context merger |
+| Deep-cell conversion, second pass | 94 s | 13.44 s | 7.0x; 85.7% | mmap CpG index and direct VCF/YAME encoding |
+| 23DM full pileup | 3.62 h observed at 48 CPUs | 0.53 h projected at 48 CPUs | 6.8x | size-aware joint calls plus direct conversion; model pending full run |
+| Shallow 10D full pileup | 2.35 h observed at 20 CPUs | 0.20 h projected at 20 CPUs | 11.8x | 16-cell batches and no dense conversion scans; model pending full run |
 | Sort plus BAM index, 2M records | 22 s | 16 s | 1.38x; 27.3% | `samtools sort --write-index` |
 | Flagstat, 2.16-GB BAM | 49 s | 26 s | 1.88x; 46.9% | threaded BAM decode |
 | 21DM unmatched branch | about 131 h old completion estimate | 30-45 h at 69 CPUs | 2.9-4.4x; 86-101 h | removal of hash backpressure plus CPU increase |
@@ -401,6 +472,12 @@ remains wider than an ideal CPU-ratio calculation.
 - `check_pileup_transport_downstream.sh`: one/two-pass and merge-backend
   equivalence through packed CpG output.
 - `validate_integrated_pileup_cell.sh`: actual Snakefile deep-cell regression.
+- `pileup_20260820.tsv`: direct conversion, joint-batch, stream, restart, and
+  historical full-sample timing summary for the second pileup pass.
+- `tools/cpg_to_yame/test.sh`: synthetic direct/joint parser, strand merge,
+  format-3 encoding, and unsafe-header checks.
+- `tools/test_plan_pileup_batches.py`: deterministic size-balancing and batch
+  content-key tests.
 - `benchmark_sort_compression.sh`: BAM compression speed/space tradeoff.
 - `benchmark_sort_inline_index.sh`: separate versus inline indexing.
 - `benchmark_flagstat_threads.sh`: BAM scan threading.

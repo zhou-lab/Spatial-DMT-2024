@@ -1,0 +1,4 @@
+cpg_to_yame
+*.o
+.build.lock
+*.tmp
