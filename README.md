@@ -63,7 +63,7 @@ brew install bbtools   # tested: 39.81b
 | [samtools](https://www.htslib.org/) | 1.22.1 | bioconda |
 | bgzip / tabix (htslib) | 1.22.1 | bioconda |
 | [bedtools](https://bedtools.readthedocs.io/) | 2.31.1 | bioconda |
-| [dupsifter](https://github.com/huishenlab/dupsifter) | 1.3.0 | bioconda |
+| [dupsifter](https://github.com/huishenlab/dupsifter) | 1.3.x-derived vendored build | built by the workflow against HTSlib |
 | [yame](https://github.com/zhou-lab/yame) | 1.9 | bioconda |
 | [pigz](https://zlib.net/pigz/) | 2.8 | conda-forge |
 | [GNU parallel](https://www.gnu.org/software/parallel/) | 20260422 | conda-forge |
@@ -75,7 +75,7 @@ brew install bbtools   # tested: 39.81b
 | [Biopython](https://biopython.org/) | — | conda-forge |
 | [fuzzysearch](https://github.com/taleinat/fuzzysearch) | — | conda-forge (used by `spatialmeth_trimtag.py` for R1 adapter scan) |
 | [regex](https://pypi.org/project/regex/) | — | conda-forge (smcseq fuzzy linker patterns) |
-| [pysam](https://github.com/pysam-developers/pysam) | — | conda-forge (used by `split_bam_by_cb.py` and `barcode_summary.py`) |
+| [pysam](https://github.com/pysam-developers/pysam) | — | conda-forge (used by `barcode_summary.py`; the Python BAM splitter remains as a benchmark reference) |
 | matplotlib | — | conda-forge |
 | pandas | — | conda-forge |
 
@@ -115,10 +115,40 @@ snakemake --profile "$REPO/profiles/local_HPC" \
 **SLURM cluster:**
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
+capacity=$("$REPO/tools/slurm_dna_capacity.sh")
+capacity_value() {
+    awk -F '\t' -v key="$1" '$1 == key { print $2 }' <<< "$capacity"
+}
+rule_cpus=$(capacity_value paired_rule_cpus_now)
+controller_cpus=$(capacity_value controller_cpus_now)
+controller_mem=$(capacity_value controller_memory_mb)
 snakemake --profile "$REPO/profiles/slurm" \
     --snakefile "$REPO/main/Snakefile" \
-    --config ref=hg38
+    --cores "$controller_cpus" --jobs 4 \
+    --resources cpus_per_task="$controller_cpus" mem_mb="$controller_mem" \
+    --config ref=hg38 \
+        DNA_TRIM_CPUS="$rule_cpus" \
+        DNA_ALIGN_CPUS="$rule_cpus" \
+        DNA_PILEUP_CPUS="$rule_cpus" \
+        UNMATCHED_ALIGN_CPUS="$rule_cpus"
 ```
+
+With an otherwise empty account under a 144-CPU cap, the helper returns a
+138-CPU controller and 69 CPUs per heavy rule, allowing one sample's matched
+and unmatched DNA alignments to run together. Heavy DNA rules mirror their allocation in
+both native Snakemake `threads` and the profile's `cpus_per_task` resource;
+set both controller limits to the same budget. The native thread ledger stops
+over-submission, while `cpus_per_task` supplies the Slurm allocation.
+On the lab cluster, run `tools/slurm_dna_capacity.sh` immediately before
+submission because the `defq` per-user limit changes dynamically. The defaults
+fit two heavy rules plus six spare CPUs under the current 144-CPU limit. Set
+the two controller values and `DNA_{TRIM,ALIGN}_CPUS`/
+`UNMATCHED_ALIGN_CPUS` to the helper's reported budgets if the live limit or
+existing allocation differs. Set the global `mem_mb` resource to its reported
+`controller_memory_mb` value so concurrent samples also respect the QOS memory
+cap after current job allocations; the helper reserves 40 GiB by default. For
+an unmatched-only restart, use `single_rule_cpus_now` instead of the paired
+budget.
 
 The default target is `final_output`. To run it explicitly, append the target after `--`:
 
@@ -161,7 +191,31 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 | `WORKDIR` | `pipeline_output` | Intermediate outputs (merged tagged FASTQs, merged BAM, per-cell BAMs, VCFs, qc/). Accepts absolute paths. |
 | `OUTDIR` | `final_output` | Per-sample deliverable bundle (`.cg`, qc reports, gene matrix). Accepts absolute paths. |
 | `protocol` | `spatialdmt` | R2 chemistry: `spatialdmt` (50×50 grid, 8+8 bp barcodes) or `smcseq` (96×96 grid, 11+11 bp barcodes). See [R2 chemistry](#r2-chemistry-protocol-switch) for grammar details. |
-| `DUPSIFTER` | `~/software/dupsifter/v1.3.0/bin/dupsifter` | Path to a dupsifter ≥ 1.3.0 binary (the `-B` barcode-aware dedup flag was added in 1.3.0). |
+| `DUPSIFTER` | `tools/dupsifter_speed/dupsifter` | Path to dupsifter. The default optimized vendored build is created automatically and retains the 1.3.x `-B` behavior. |
+| `CB_SPLITTER` | `tools/split_bam_by_cb_hts/split_bam_by_cb_hts` | Compiled CB-tag BAM splitter; built automatically. |
+| `MERGECG_CONTEXT` | `tools/mergecg_context/mergecg_context` | Context-aware single-cell CpG strand merger; built automatically and avoids repeated reference loads. |
+| `DNA_TRIM_CPUS` | `69` | CPUs allocated to streaming trim/barcode assignment. |
+| `DNA_TRIM_OVERHEAD_CPUS` | `4` | Allocated trim CPUs reserved for paired decompression and stream dispatch. |
+| `DNA_TRIM_WORKERS` | `DNA_TRIM_CPUS - DNA_TRIM_OVERHEAD_CPUS` | Python trim workers; override only after measuring total job CPU use. |
+| `DNA_TRIM_BLOCK_SIZE` | `auto` | GNU Parallel block size. Auto selects 64, 256, or 512 MiB from input size. |
+| `DNA_TRIM_COMPRESSION_LEVEL` | `1` | Gzip level for trim FASTQs. This time-first default was 5% faster than level 3 with 14% larger output in the fixed deep-concurrency benchmark. |
+| `DNA_TRIM_MEM` | `160G` | Memory for deep streaming trim at the default worker count. |
+| `DNA_ALIGN_CPUS` | `69` | CPUs allocated to matched BISCUIT alignment. |
+| `DNA_ALIGN_MEM` | `400G` | Memory for deep matched alignment, deduplication, and sort. |
+| `DNA_ALIGN_SORT_CPUS` | `16` | `samtools sort` threads inside the matched allocation. |
+| `DNA_PILEUP_CPUS` | `DNA_ALIGN_CPUS` | CPUs allocated across independent per-cell BISCUIT pileups. |
+| `DNA_PILEUP_MEM` | `80G` | Memory for per-cell pileup and conversion processing. |
+| `PILEUP_THREADS_PER_CELL` | `1` | BISCUIT threads per cell; one-thread cells maximize aggregate throughput and load balancing. |
+| `PILEUP_WINDOW_STEP` | `1000000` | Bases per BISCUIT pileup dispatch window; 1 Mb was fastest without the memory growth of larger windows. |
+| `LAMBDA_ALIGN_CPUS` | `48` | CPUs allocated to lambda BISCUIT alignment. |
+| `LAMBDA_ALIGN_SORT_CPUS` | `24` | `samtools sort` threads inside the lambda allocation. |
+| `UNMATCHED_ALIGN_CPUS` | `69` | CPUs allocated to unmatched BISCUIT alignment. |
+| `UNMATCHED_ALIGN_MEM` | `400G` | Memory for deep unmatched alignment, deduplication, and sort. |
+| `UNMATCHED_SORT_CPUS` | `16` | `samtools sort` threads inside the unmatched allocation. |
+| `SORT_LOCAL_MIN_GB` | `250` | Minimum free local scratch before sort can use it. Input-aware checks may require more. |
+| `SORT_LOCAL_INPUT_FACTOR` | `3` | Estimated BAM/sort-scratch bytes per compressed alignment-input byte. |
+| `SORT_LOCAL_HEADROOM_GB` | `20` | Free space retained on the sort-scratch filesystem. |
+| `STORAGE_HEADROOM_GB` | `20` | Free space retained by trim, alignment, and bucket-split preflight checks. |
 
 Example with absolute paths (keeps intermediates and deliverables on separate disks):
 ```bash
@@ -221,7 +275,7 @@ Switch with `--config protocol=smcseq` — see the [smcseq run example](#running
 
 **Architecture note**: demux-after-align with a separate unmatched track.
 
-Matched reads (BC1+BC2 hit the whitelist, exact or Hamming-1) get an 8-char ACGT CB tag encoding their (X, Y) coord (`tools/cb_codec.py`; the ACGT encoding is required because `dupsifter -B` silently collapses any non-{ACGTN} CB tag to a single bucket), and flow through one merged FASTQ → one biscuit alignment → cell-aware `dupsifter -B` → per-cell BAM split (`tools/split_bam_by_cb.py`) → per-cell pileup.
+Matched reads (BC1+BC2 hit the whitelist, exact or Hamming-1) get an 8-char ACGT CB tag encoding their (X, Y) coord (`tools/cb_codec.py`; the ACGT encoding is required because `dupsifter -B` silently collapses any non-{ACGTN} CB tag to a single bucket), and flow through one merged FASTQ → one biscuit alignment → cell-aware `dupsifter -B` → bounded bucketed per-cell BAM split (`tools/split_bam_by_cb_bucketed.sh`) → per-cell pileup.
 
 Unmatched reads — structure-fail (`_SF` suffix in read name) and whitelist-miss (`_WM`) — are split off at the trim step into a parallel `Unmatched_R{1,2}.fq.gz` pair, aligned independently into `bam_unmatched/`, and summarised by `mqc_unmatched_diagnostics`. They never enter the merged BAM, so per-cell stats stay clean.
 
@@ -229,7 +283,7 @@ This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawn
 
 **DNA methylation branch (matched track):**
 
-1. `dna_trim_and_tag` — Adapter trim (R1) + structural-prefix parse (R2: primer + BC1 + linker + BC2 + linker + Tn5 ME [+ UMI for smcseq]). Look up BC1+BC2 in the whitelist (Hamming-1 tolerated), encode the matched (X, Y) coord as an 8-char ACGT string, rewrite each read name as `<origid>_<CB>_<UMI>`. Emits one merged R1/R2 tagged FASTQ pair for matched reads, plus a separate `Unmatched_R{1,2}.fq.gz` pair for structure-fail + whitelist-miss reads (`tools/spatialmeth_trimtag.py`; chunked-parallel via GNU parallel, pigz output).
+1. `dna_trim_and_tag` — Adapter trim (R1) + structural-prefix parse (R2: primer + BC1 + linker + BC2 + linker + Tn5 ME [+ UMI for smcseq]). Look up BC1+BC2 in the whitelist (Hamming-1 tolerated), encode the matched (X, Y) coord as an 8-char ACGT string, rewrite each read name as `<origid>_<CB>_<UMI>`. Emits one merged R1/R2 tagged FASTQ pair for matched reads, plus a separate `Unmatched_R{1,2}.fq.gz` pair for structure-fail + whitelist-miss reads (`tools/spatialmeth_trimtag.py`; paired block streaming via GNU parallel, without raw temporary FASTQs).
 2. `dna_biscuit_align` — One `biscuit align -9` over the matched-track FASTQ pair → `dupsifter -B` (cell-aware, BS-correct dedup via the CB tag) → `samtools sort` → per-cell BAM split keyed on CB. Outputs `bam_merged/{sample}_merged_dedup.bam` and `bam/<XXYY>.bam` per cell — every CB is a real whitelist coord, no sentinel cell.
 3. `dna_biscuit_pileup` — CpG methylation pileup per per-cell BAM (parallel via GNU parallel), VCF→BED conversion, strand merging, CpG BED intersection, packing into a yame `.cg` file indexed by cell coord. Also writes per-cell `tmp/pileup/{XXYY}.conv.tsv` (CA/CC/CG/CT β-sum + count) and pools them into the sample-level `qc/biscuit_qc/{sample}_totalBaseConversionRate.txt` — one pileup per cell, no second sample-level pileup anywhere.
 4. `dna_biscuit_align_lambda` — Align reads to the lambda genome for bisulfite conversion efficiency estimation. **Inputs differ by protocol**: `spatialdmt` uses the dedicated `trim/{sample}_Lambda_R{1,2}.fq.gz` files emitted by the trim step (barcode-85 reads only); `smcseq` aligns the FULL matched-track FASTQ pair to lambda since there's no dedicated lambda barcode in that protocol.
@@ -260,15 +314,15 @@ pipeline_output/{sample}/
                      #   Unmatched FASTQs ({sample}_Unmatched_R{1,2}.fq.gz, _SF/_WM tagged) +
                      #   Lambda_R{1,2} only for spatialdmt
   bam_merged/        # one big {sample}_merged_dedup.bam (matched track, post-align + dupsifter -B)
-  bam/               # per-cell BAMs named <XXYY>.bam (from split_bam_by_cb.py); every CB is a
-                     #   real whitelist coord, no sentinel bucket
+  bam/               # per-cell BAMs named <XXYY>.bam plus compact CSI indexes (from the bucketed
+                     #   C splitter); every CB is a real whitelist coord, no sentinel bucket
   bam_unmatched/     # {sample}_unmatched.bam — sample-level alignment of the Unmatched fastqs
                      #   (no -9, no -B; position-only dedup since there's no real cell here)
   bam_lambda/        # lambda BAM with flagstat and dupsifter stats
   pileup/            # {sample}.cg + {sample}.cg.idx (yame packed CpG methylation indexed by cell)
                      #   and {sample}_Lambda.cg
   align_list.txt     # list of per-cell coord tags (XXYY) that have BAMs; consumed by pileup + QC
-  tmp/               # all intermediates removed by clean: per-chunk trim outputs, pileup VCFs,
+  tmp/               # all intermediates removed by clean: per-block trim outputs, pileup VCFs,
                      #   per-cell .cg + .conv.tsv shards, filtered RNA FASTQs, lambda pileup intermediates
   rna_bbduk/         # bbduk filter stats per step (RNA samples only)
   rna_STAR/          # Aligned.out.sam, STAR logs, Solo.out/ (count matrix; RNA samples only)

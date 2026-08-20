@@ -170,13 +170,86 @@ rule final_output:
 ##
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
 ## invocations per sample.
-DUPSIFTER = config.get("DUPSIFTER", "/mnt/isilon/zhoulab/labbin/dupsifter")
+TOOLS_DIR = os.path.join(workflow.basedir, "..", "tools")
+TRIM_SCRIPT = os.path.join(TOOLS_DIR, "spatialmeth_trimtag.py")
+CB_CODEC = os.path.join(TOOLS_DIR, "cb_codec.py")
+FUZZY_MATCHER = os.path.join(TOOLS_DIR, "fuzzy_match.py")
+LOCAL_DUPSIFTER_DIR = os.path.join(TOOLS_DIR, "dupsifter_speed")
+LOCAL_DUPSIFTER = os.path.join(LOCAL_DUPSIFTER_DIR, "dupsifter")
+DUPSIFTER = config.get("DUPSIFTER", LOCAL_DUPSIFTER)
+LOCAL_CB_SPLITTER_DIR = os.path.join(TOOLS_DIR, "split_bam_by_cb_hts")
+LOCAL_CB_SPLITTER = os.path.join(LOCAL_CB_SPLITTER_DIR, "split_bam_by_cb_hts")
+CB_SPLITTER = config.get("CB_SPLITTER", LOCAL_CB_SPLITTER)
+CB_SPLITTER_WRAPPER = os.path.join(TOOLS_DIR, "split_bam_by_cb_bucketed.sh")
+LOCAL_MERGECG_CONTEXT_DIR = os.path.join(TOOLS_DIR, "mergecg_context")
+LOCAL_MERGECG_CONTEXT = os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "mergecg_context")
+MERGECG_CONTEXT = config.get("MERGECG_CONTEXT", LOCAL_MERGECG_CONTEXT)
 YAME = config.get(
     "YAME",
     "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/yame",
 )
-SPLIT_BAM_BY_CB = os.path.join(workflow.basedir, "..", "tools", "split_bam_by_cb.py")
 SMCSEQ_BSCONV_ARGS = config.get("SMCSEQ_BSCONV_ARGS", "-m 2")
+DNA_TRIM_CPUS = int(config.get("DNA_TRIM_CPUS", 69))
+DNA_TRIM_OVERHEAD_CPUS = int(config.get("DNA_TRIM_OVERHEAD_CPUS", 4))
+DNA_TRIM_WORKERS = int(config.get(
+    "DNA_TRIM_WORKERS",
+    max(1, DNA_TRIM_CPUS - DNA_TRIM_OVERHEAD_CPUS),
+))
+if DNA_TRIM_CPUS < 1 or DNA_TRIM_OVERHEAD_CPUS < 0 or DNA_TRIM_WORKERS < 1:
+    raise ValueError(
+        "DNA_TRIM_CPUS and DNA_TRIM_WORKERS must be positive; "
+        "DNA_TRIM_OVERHEAD_CPUS must be nonnegative."
+    )
+DNA_TRIM_WORKERS = min(DNA_TRIM_WORKERS, DNA_TRIM_CPUS)
+DNA_TRIM_BLOCK_SIZE = config.get("DNA_TRIM_BLOCK_SIZE", "auto")
+DNA_TRIM_COMPRESSION_LEVEL = int(config.get("DNA_TRIM_COMPRESSION_LEVEL", 1))
+if not 0 <= DNA_TRIM_COMPRESSION_LEVEL <= 9:
+    raise ValueError("DNA_TRIM_COMPRESSION_LEVEL must be between 0 and 9.")
+DNA_ALIGN_CPUS = int(config.get("DNA_ALIGN_CPUS", 69))
+DNA_ALIGN_SORT_CPUS = int(config.get("DNA_ALIGN_SORT_CPUS", 16))
+DNA_PILEUP_CPUS = int(config.get("DNA_PILEUP_CPUS", DNA_ALIGN_CPUS))
+PILEUP_THREADS_PER_CELL = int(config.get("PILEUP_THREADS_PER_CELL", 1))
+PILEUP_WINDOW_STEP = int(config.get("PILEUP_WINDOW_STEP", 1000000))
+UNMATCHED_ALIGN_CPUS = int(config.get("UNMATCHED_ALIGN_CPUS", 69))
+UNMATCHED_SORT_CPUS = int(config.get("UNMATCHED_SORT_CPUS", 16))
+LAMBDA_ALIGN_CPUS = int(config.get("LAMBDA_ALIGN_CPUS", 48))
+LAMBDA_ALIGN_SORT_CPUS = int(config.get("LAMBDA_ALIGN_SORT_CPUS", 24))
+DNA_SPLIT_JOBS = min(int(config.get("DNA_SPLIT_JOBS", DNA_ALIGN_CPUS)), DNA_ALIGN_CPUS)
+DNA_SPLIT_BUCKET_THREADS = int(
+    config.get("DNA_SPLIT_BUCKET_THREADS", min(32, max(1, DNA_ALIGN_CPUS - 1)))
+)
+DNA_SPLIT_BUCKET_THREADS = min(DNA_SPLIT_BUCKET_THREADS, DNA_ALIGN_CPUS)
+for setting, value in {
+    "DNA_ALIGN_CPUS": DNA_ALIGN_CPUS,
+    "DNA_ALIGN_SORT_CPUS": DNA_ALIGN_SORT_CPUS,
+    "DNA_PILEUP_CPUS": DNA_PILEUP_CPUS,
+    "PILEUP_THREADS_PER_CELL": PILEUP_THREADS_PER_CELL,
+    "PILEUP_WINDOW_STEP": PILEUP_WINDOW_STEP,
+    "UNMATCHED_ALIGN_CPUS": UNMATCHED_ALIGN_CPUS,
+    "UNMATCHED_SORT_CPUS": UNMATCHED_SORT_CPUS,
+    "LAMBDA_ALIGN_CPUS": LAMBDA_ALIGN_CPUS,
+    "LAMBDA_ALIGN_SORT_CPUS": LAMBDA_ALIGN_SORT_CPUS,
+    "DNA_SPLIT_JOBS": DNA_SPLIT_JOBS,
+    "DNA_SPLIT_BUCKET_THREADS": DNA_SPLIT_BUCKET_THREADS,
+}.items():
+    if value < 1:
+        raise ValueError(f"{setting} must be positive.")
+if DNA_TRIM_OVERHEAD_CPUS >= DNA_TRIM_CPUS:
+    raise ValueError("DNA_TRIM_OVERHEAD_CPUS must be smaller than DNA_TRIM_CPUS.")
+DNA_TRIM_WORKERS = min(
+    DNA_TRIM_WORKERS,
+    DNA_TRIM_CPUS - DNA_TRIM_OVERHEAD_CPUS,
+)
+SORT_LOCAL_MIN_GB = int(config.get("SORT_LOCAL_MIN_GB", 250))
+SORT_LOCAL_INPUT_FACTOR = int(config.get("SORT_LOCAL_INPUT_FACTOR", 3))
+SORT_LOCAL_HEADROOM_GB = int(config.get("SORT_LOCAL_HEADROOM_GB", 20))
+STORAGE_HEADROOM_GB = int(config.get("STORAGE_HEADROOM_GB", 20))
+if (SORT_LOCAL_MIN_GB < 0 or SORT_LOCAL_INPUT_FACTOR < 1
+        or SORT_LOCAL_HEADROOM_GB < 0 or STORAGE_HEADROOM_GB < 0):
+    raise ValueError(
+        "Sort/storage sizes must be nonnegative and "
+        "SORT_LOCAL_INPUT_FACTOR must be at least 1."
+    )
 if PROTOCOL == "smcseq":
     DNA_QC_MERGED_BAM = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam"
     DNA_QC_MERGED_FLAGSTAT = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.flagstat"
@@ -184,8 +257,57 @@ else:
     DNA_QC_MERGED_BAM = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam"
     DNA_QC_MERGED_FLAGSTAT = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat"
 
+rule build_local_dupsifter:
+    input:
+        os.path.join(LOCAL_DUPSIFTER_DIR, "dupsifter.c"),
+        os.path.join(LOCAL_DUPSIFTER_DIR, "khashl.h"),
+        os.path.join(LOCAL_DUPSIFTER_DIR, "refcache.h"),
+        os.path.join(LOCAL_DUPSIFTER_DIR, "util.h"),
+        os.path.join(LOCAL_DUPSIFTER_DIR, "version.h"),
+        os.path.join(LOCAL_DUPSIFTER_DIR, "Makefile"),
+    output:
+        LOCAL_DUPSIFTER,
+    resources:
+        mem = "4G",
+        time = "00:15:00",
+        cpus_per_task = 1,
+    params:
+        source_dir = LOCAL_DUPSIFTER_DIR,
+    shell:
+        "flock {params.source_dir}/.build.lock make -C {params.source_dir} dupsifter"
+
+rule build_local_cb_splitter:
+    input:
+        os.path.join(LOCAL_CB_SPLITTER_DIR, "split_bam_by_cb_hts.c"),
+        os.path.join(LOCAL_CB_SPLITTER_DIR, "Makefile"),
+    output:
+        LOCAL_CB_SPLITTER,
+    resources:
+        mem = "4G",
+        time = "00:15:00",
+        cpus_per_task = 1,
+    params:
+        source_dir = LOCAL_CB_SPLITTER_DIR,
+    shell:
+        "flock {params.source_dir}/.build.lock make -C {params.source_dir} split_bam_by_cb_hts"
+
+rule build_local_mergecg_context:
+    input:
+        os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "mergecg_context.c"),
+        os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "Makefile"),
+    output:
+        LOCAL_MERGECG_CONTEXT,
+    resources:
+        mem = "4G",
+        time = "00:15:00",
+        cpus_per_task = 1,
+    params:
+        source_dir = LOCAL_MERGECG_CONTEXT_DIR,
+    shell:
+        "flock {params.source_dir}/.build.lock make -C {params.source_dir} mergecg_context"
+
 ## Lambda fastq outputs only exist for spatialdmt -- smcseq has no dedicated
-## lambda barcode, so spatialmeth_trimtag.py doesn't write per-chunk Lambda
+## lambda barcode, so spatialmeth_trimtag.py doesn't write per-block Lambda
 ## fastqs and the cat block is skipped (see _LAMBDA_CAT_BLOCK below).
 _TRIM_LAMBDA_OUTS = {}
 _LAMBDA_CAT_BLOCK = ""
@@ -198,9 +320,11 @@ if PROTOCOL == "spatialdmt":
     }
     _MATCHED_CAT_BLOCK = """
         :> {output.r1_out}; :> {output.r2_out}
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_[0-9][0-9][0-9][0-9]_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.r1_out}
-            cat "${{f%_R1.fq.gz}}_R2.fq.gz" >> {output.r2_out}
+        for s in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt | sort -V); do
+            p=${{s%_stats.txt}}
+            cat "${{p}}_R1.fq.gz" >> {output.r1_out}
+            cat "${{p}}_R2.fq.gz" >> {output.r2_out}
+            rm -f "${{p}}_R1.fq.gz" "${{p}}_R2.fq.gz"
         done"""
     _TRIM_LAMBDA_OUTS = {
         "lambda_r1": WORKDIR + "/{sample}/trim/{sample}_Lambda_R1.fq.gz",
@@ -208,9 +332,11 @@ if PROTOCOL == "spatialdmt":
     }
     _LAMBDA_CAT_BLOCK = """
         :> {output.lambda_r1}; :> {output.lambda_r2}
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Lambda_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.lambda_r1}
-            cat "${{f%_Lambda_R1.fq.gz}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
+        for s in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt | sort -V); do
+            p=${{s%_stats.txt}}
+            cat "${{p}}_Lambda_R1.fq.gz" >> {output.lambda_r1}
+            cat "${{p}}_Lambda_R2.fq.gz" >> {output.lambda_r2}
+            rm -f "${{p}}_Lambda_R1.fq.gz" "${{p}}_Lambda_R2.fq.gz"
         done"""
 else:
     _TRIM_MATCHED_OUTS = {
@@ -219,9 +345,11 @@ else:
     }
     _MATCHED_CAT_BLOCK = """
         :> {output.watson_r1}; :> {output.crick_r1}
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Watson_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.watson_r1}
-            cat "${{f%_Watson_R1.fq.gz}}_Crick_R1.fq.gz" >> {output.crick_r1}
+        for s in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt | sort -V); do
+            p=${{s%_stats.txt}}
+            cat "${{p}}_Watson_R1.fq.gz" >> {output.watson_r1}
+            cat "${{p}}_Crick_R1.fq.gz" >> {output.crick_r1}
+            rm -f "${{p}}_Watson_R1.fq.gz" "${{p}}_Crick_R1.fq.gz"
         done"""
 
 rule dna_trim_and_tag:
@@ -229,57 +357,121 @@ rule dna_trim_and_tag:
         r1 = lambda wildcards: get_fastq(wildcards, "DNA_1"),
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
         wl = BARCODE_WHITELIST,
+        trim_script = TRIM_SCRIPT,
+        cb_codec = CB_CODEC,
+        fuzzy_matcher = FUZZY_MATCHER,
     output:
         unmatched_r1   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
         unmatched_r2   = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
         stats          = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
         **_TRIM_MATCHED_OUTS,
         **_TRIM_LAMBDA_OUTS,
+    threads: DNA_TRIM_CPUS
     resources:
-        mem = "90G",
+        mem = config.get("DNA_TRIM_MEM", "160G"),
         time = "120:00:00",
-        cpus_per_task = 48,
+        cpus_per_task = threads,
+    params:
+        block_size = DNA_TRIM_BLOCK_SIZE,
+        workers = DNA_TRIM_WORKERS,
+        overhead_cpus = DNA_TRIM_OVERHEAD_CPUS,
+        compression_level = DNA_TRIM_COMPRESSION_LEVEL,
+        storage_headroom_gb = STORAGE_HEADROOM_GB,
     shell:
         """
         set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/trim/ \
                  {WORKDIR}/{wildcards.sample}/tmp/trim/
 
-        CAT_CMD1="cat"
-        if [[ {input.r1} == *.gz ]]; then CAT_CMD1="pigz -dc"; fi
-        CAT_CMD2="cat"
-        if [[ {input.r2} == *.gz ]]; then CAT_CMD2="pigz -dc"; fi
+        find {WORKDIR}/{wildcards.sample}/tmp/trim/ -maxdepth 1 -type f \
+            \\( -name '_out_*' -o -name '_chunk_*' \\) -delete
 
-        $CAT_CMD1 {input.r1} | split -d -a 4 -l 40000000 - {WORKDIR}/{wildcards.sample}/tmp/trim/_chunk_1
-        $CAT_CMD2 {input.r2} | split -d -a 4 -l 40000000 - {WORKDIR}/{wildcards.sample}/tmp/trim/_chunk_2
+        decompress_fastq() {{
+            if [[ $1 == *.gz ]]; then
+                pigz -dc -p 2 -- "$1"
+            else
+                cat -- "$1"
+            fi
+        }}
 
-        parallel --halt soon,fail=1 -j {resources.cpus_per_task} '
-            f={{}}; b=$(basename "$f"); cid=${{b#_chunk_1}}
-            d=$(dirname "$f"); f2="$d/_chunk_2$cid"
-            {PYTHON} {workflow.basedir}/../tools/spatialmeth_trimtag.py \
-                "$f" "$f2" \
-                -o {WORKDIR}/{wildcards.sample}/tmp/trim/_out_"$cid" \
+        input_bytes=$(( $(stat -Lc %s {input.r1}) + $(stat -Lc %s {input.r2}) ))
+        output_available=$(df --output=avail -B1 {WORKDIR}/{wildcards.sample} | tail -1)
+        output_required=$((input_bytes + {params.storage_headroom_gb} * 1024 * 1024 * 1024))
+        if (( output_available < output_required )); then
+            echo "trim output needs about $output_required bytes; $output_available available" >&2
+            exit 1
+        fi
+
+        exec 3< <(decompress_fastq {input.r1} | paste - - - -)
+        r1_pid=$!
+        exec 4< <(decompress_fastq {input.r2} | paste - - - -)
+        r2_pid=$!
+
+        block_size={params.block_size}
+        if [[ $block_size == auto ]]; then
+            if (( input_bytes <= 20 * 1024 * 1024 * 1024 )); then
+                block_size=64M
+            elif (( input_bytes <= 100 * 1024 * 1024 * 1024 )); then
+                block_size=256M
+            else
+                block_size=512M
+            fi
+        fi
+        echo "trim stream block size: $block_size" >&2
+
+        workers={params.workers}
+        max_workers=$(( {resources.cpus_per_task} - {params.overhead_cpus} ))
+        if (( max_workers < 1 )); then max_workers=1; fi
+        if (( workers > max_workers )); then workers=$max_workers; fi
+        echo "trim workers: $workers of {resources.cpus_per_task} allocated CPUs" >&2
+
+        set +e
+        paste /dev/fd/3 /dev/fd/4 | parallel --plain --halt soon,fail=1 --pipe \
+            --block "$block_size" --recend '\\n' \
+            -j "$workers" '
+            PYTHONHASHSEED=0 {PYTHON} {input.trim_script} \
+                - - --paired-tab-stdin \
+                -o {WORKDIR}/{wildcards.sample}/tmp/trim/_out_{{#}} \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
                     AATCATACACCAATACAAAACATCAACCAC \
                     CAAATACTCTAACCTCTCAAACACATAAAT \
                 --protocol {PROTOCOL} \
                 --whitelist {input.wl} \
                 --whitelist_col {BARCODE_WL_COL} \
-                --bc-mismatch 1
-        ' ::: {WORKDIR}/{wildcards.sample}/tmp/trim/_chunk_1*
+                --bc-mismatch 1 \
+                --matcher exact-seeded \
+                --skip-barcode-counts \
+                --compression-level {params.compression_level} \
+                --compression-backend gzip
+        '
+        stream_status=$?
+        exec 3<&-
+        exec 4<&-
+        wait "$r1_pid"; r1_status=$?
+        wait "$r2_pid"; r2_status=$?
+        set -e
+        if (( stream_status != 0 || r1_status != 0 || r2_status != 0 )); then
+            echo "trim stream failed: workers=$stream_status R1=$r1_status R2=$r2_status" >&2
+            exit 1
+        fi
 
-        ## Cat per-chunk gzipped outputs (gzip concat is valid; readers stream through)
-        :> {output.unmatched_r1}; :> {output.unmatched_r2}
-        for f in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_Unmatched_R1.fq.gz | sort -V); do
-            cat "$f" >> {output.unmatched_r1}
-            cat "${{f%_Unmatched_R1.fq.gz}}_Unmatched_R2.fq.gz" >> {output.unmatched_r2}
-        done""" + _MATCHED_CAT_BLOCK + _LAMBDA_CAT_BLOCK + """
-
-        ## Sum per-chunk stats fieldwise
+        ## Sum per-block stats before consuming the output shards.
         awk '{{cnt[$1]+=$2}} END {{
             for (k in cnt) print k"\t"cnt[k]
         }}' {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt \
             | sort -k1,1 > {output.stats}
+
+        ## Gzip concatenation is valid. Remove shards as they enter final outputs
+        ## so peak scratch usage stays close to the final compressed size.
+        :> {output.unmatched_r1}; :> {output.unmatched_r2}
+        for s in $(/bin/ls {WORKDIR}/{wildcards.sample}/tmp/trim/_out_*_stats.txt | sort -V); do
+            p=${{s%_stats.txt}}
+            cat "${{p}}_Unmatched_R1.fq.gz" >> {output.unmatched_r1}
+            cat "${{p}}_Unmatched_R2.fq.gz" >> {output.unmatched_r2}
+            rm -f "${{p}}_Unmatched_R1.fq.gz" "${{p}}_Unmatched_R2.fq.gz"
+        done""" + _MATCHED_CAT_BLOCK + _LAMBDA_CAT_BLOCK + """
+        find {WORKDIR}/{wildcards.sample}/tmp/trim/ -maxdepth 1 -type f \
+            \\( -name '_out_*_stats.txt' -o -name '_out_*_barcodes_all.txt' \\) -delete
         """
 
 ## One biscuit align call (with -9 to parse <origid>_<XXYY>_<UMI> into CB:Z+RX:Z),
@@ -295,6 +487,7 @@ if PROTOCOL == "smcseq":
             biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} {input.watson_r1}
             biscuit align {params.biscuit_index} -b 3 -9 -@ {resources.cpus_per_task} {input.crick_r1} | samtools view
         }}"""
+    _DNA_SORT_INPUT_PATHS = "{input.watson_r1} {input.crick_r1}"
     _DNA_ALIGN_EXTRA_OUTS = {}
     _DNA_SPLIT_BLOCK = ""
     _DNA_DUPSIFTER_MODE = "-s"
@@ -306,16 +499,39 @@ else:
     _DNA_ALIGN_COMMAND = """
         biscuit align {params.biscuit_index} -b 1 -9 -@ {resources.cpus_per_task} \
             {input.r2} {input.r1}"""
+    _DNA_SORT_INPUT_PATHS = "{input.r1} {input.r2}"
     _DNA_ALIGN_EXTRA_OUTS = {
         "align_txt": WORKDIR + "/{sample}/align_list.txt",
     }
     _DNA_SPLIT_BLOCK = """
-        {PYTHON} {SPLIT_BAM_BY_CB} {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
+        split_jobs={params.split_jobs}
+        if (( split_jobs > {resources.cpus_per_task} )); then
+            split_jobs={resources.cpus_per_task}
+        fi
+        split_bucket_threads={params.split_bucket_threads}
+        max_bucket_threads=$(( {resources.cpus_per_task} > 1 ? {resources.cpus_per_task} - 1 : 1 ))
+        if (( split_bucket_threads > max_bucket_threads )); then
+            split_bucket_threads=$max_bucket_threads
+        fi
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -type f \
+            \\( -name '*.bam' -o -name '*.bam.bai' -o -name '*.bam.csi' \\) -delete
+        SPLITTER={input.cb_splitter} \
+        SPLIT_JOBS="$split_jobs" \
+        BUCKET_THREADS="$split_bucket_threads" \
+        SPLIT_HEADROOM_GB={params.storage_headroom_gb} \
+        SPLIT_FALLBACK_TMPDIR={WORKDIR}/{wildcards.sample}/tmp/cb_split \
+        {input.cb_splitter_wrapper} \
+            {output.merged_bam} {WORKDIR}/{wildcards.sample}/bam/
         find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
-            | parallel -j {resources.cpus_per_task} samtools index
+            | parallel -j {resources.cpus_per_task} samtools index -c
         find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
             -printf '%f\\n' | sed 's/\\.bam$//' | sort > {output.align_txt}"""
     _DNA_DUPSIFTER_MODE = ""
+
+_DNA_ALIGN_INPUTS["dupsifter"] = DUPSIFTER
+if PROTOCOL == "spatialdmt":
+    _DNA_ALIGN_INPUTS["cb_splitter"] = CB_SPLITTER
+    _DNA_ALIGN_INPUTS["cb_splitter_wrapper"] = CB_SPLITTER_WRAPPER
 
 rule dna_biscuit_align:
     input:
@@ -326,19 +542,69 @@ rule dna_biscuit_align:
         merged_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         dup_stats = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         **_DNA_ALIGN_EXTRA_OUTS,
+    threads: DNA_ALIGN_CPUS
     resources:
-        mem = "160G",
-        time = "96:00:00",
-        cpus_per_task = 48,
+        mem = config.get("DNA_ALIGN_MEM", "400G"),
+        time = config.get("DNA_ALIGN_TIME", "120:00:00"),
+        cpus_per_task = threads,
     params:
         biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
         ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
+        sort_threads  = DNA_ALIGN_SORT_CPUS,
+        sort_mem      = config.get("DNA_ALIGN_SORT_MEM", "1G"),
+        local_min_gb  = SORT_LOCAL_MIN_GB,
+        local_input_factor = SORT_LOCAL_INPUT_FACTOR,
+        local_headroom_gb = SORT_LOCAL_HEADROOM_GB,
+        storage_headroom_gb = STORAGE_HEADROOM_GB,
+        split_jobs = DNA_SPLIT_JOBS,
+        split_bucket_threads = DNA_SPLIT_BUCKET_THREADS,
     shell:
         """
         set -xeo pipefail
         ulimit -n 65535
         mkdir -p {WORKDIR}/{wildcards.sample}/bam/ \
                  {WORKDIR}/{wildcards.sample}/bam_merged/
+
+        sort_root="${{SLURM_TMPDIR:-/tmp}}"
+        available_kb=$(df --output=avail -k "$sort_root" | tail -1)
+        sort_input_bytes=$(stat -Lc %s """ + _DNA_SORT_INPUT_PATHS + """ \
+            | awk '{{sum += $1}} END {{print sum}}')
+        estimated_bam_kb=$((sort_input_bytes * {params.local_input_factor} / 1024))
+        required_kb=$((
+            estimated_bam_kb
+            + {params.local_headroom_gb} * 1024 * 1024
+        ))
+        minimum_kb=$(( {params.local_min_gb} * 1024 * 1024 ))
+        if (( required_kb < minimum_kb )); then required_kb=$minimum_kb; fi
+        if (( available_kb >= required_kb )); then
+            sort_tmp="$sort_root/spatialdmt-${{SLURM_JOB_ID:-$$}}-{wildcards.sample}-main"
+            sort_on_output=0
+        else
+            sort_tmp="{output.merged_bam}.sorttmp-${{SLURM_JOB_ID:-$$}}"
+            sort_on_output=1
+        fi
+        sort_device=$(stat -c %d "$sort_root")
+        output_device=$(stat -c %d {WORKDIR}/{wildcards.sample}/bam_merged)
+        if [[ $sort_device == "$output_device" ]]; then sort_on_output=1; fi
+        output_available_kb=$(df --output=avail -k {WORKDIR}/{wildcards.sample}/bam_merged | tail -1)
+        output_required_kb=$((
+            estimated_bam_kb
+            + {params.storage_headroom_gb} * 1024 * 1024
+        ))
+        if (( sort_on_output )); then
+            output_required_kb=$((output_required_kb + estimated_bam_kb))
+        fi
+        if (( output_available_kb < output_required_kb )); then
+            echo "alignment output/sort needs about $output_required_kb KiB; $output_available_kb KiB available" >&2
+            exit 1
+        fi
+        echo "sort scratch: $sort_tmp (available_kb=$available_kb required_kb=$required_kb)" >&2
+        mkdir -p "$sort_tmp"
+        trap 'rm -rf "$sort_tmp"' EXIT
+        sort_threads={params.sort_threads}
+        if (( sort_threads > {resources.cpus_per_task} )); then
+            sort_threads={resources.cpus_per_task}
+        fi
 
         ## biscuit -9 parses <origid>_<CB>_<UMI> -> emits CB:Z + RX:Z tags (CB is
         ## an 8-char ACGT encoding of the spatial coord; see spatialmeth_trimtag.py).
@@ -347,10 +613,13 @@ rule dna_biscuit_align:
         ## SmC-seq follows the published method: clipped R1 only, Watson in
         ## parent orientation and Crick in daughter/PBAT-equivalent orientation.
         """ + _DNA_ALIGN_COMMAND + """ \
-        | {DUPSIFTER} """ + _DNA_DUPSIFTER_MODE + """ -B --stats-output {output.dup_stats} {params.ref_fasta} - \
-        | samtools sort -@ 24 -T {output.merged_bam}_tmp -O bam -o {output.merged_bam} -
-        samtools index {output.merged_bam}
-        samtools flagstat {output.merged_bam} > {output.merged_flagstat}
+        | {input.dupsifter} """ + _DNA_DUPSIFTER_MODE + """ -B --uncompressed-bam \
+            --stats-output {output.dup_stats} {params.ref_fasta} - \
+        | samtools sort -@ "$sort_threads" -m {params.sort_mem} \
+            -T "$sort_tmp/sort" --write-index -O bam \
+            -o {output.merged_bam}##idx##{output.merged_bai} -
+        samtools flagstat -@ "$sort_threads" \
+            {output.merged_bam} > {output.merged_flagstat}
         """ + _DNA_SPLIT_BLOCK + """
         """
 
@@ -359,24 +628,31 @@ if PROTOCOL == "smcseq":
         input:
             bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam",
             bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.bai",
+            cb_splitter = CB_SPLITTER,
+            cb_splitter_wrapper = CB_SPLITTER_WRAPPER,
         output:
             filtered_bam = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam",
             filtered_bai = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.bai",
             filtered_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bsconv.bam.flagstat",
             bsconv_stats = WORKDIR + "/{sample}/bam_merged/{sample}.bsconv.log",
             align_txt = WORKDIR + "/{sample}/align_list.txt",
+        threads: 24
         resources:
             mem = "80G",
             time = "48:00:00",
-            cpus_per_task = 24,
+            cpus_per_task = threads,
         params:
             ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
             bsconv_args = SMCSEQ_BSCONV_ARGS,
+            split_jobs = config.get("SMCSEQ_SPLIT_JOBS", 24),
+            split_bucket_threads = config.get("SMCSEQ_SPLIT_BUCKET_THREADS", 16),
+            storage_headroom_gb = STORAGE_HEADROOM_GB,
         shell:
             """
             set -xeo pipefail
-            rm -rf {WORKDIR}/{wildcards.sample}/bam/
             mkdir -p {WORKDIR}/{wildcards.sample}/bam/
+            find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -type f \
+                \\( -name '*.bam' -o -name '*.bam.bai' -o -name '*.bam.csi' \\) -delete
 
             ## Default -m 2 removes reads with >=3 retained CpH calls. CpG
             ## retention is not included in this filter.
@@ -385,9 +661,24 @@ if PROTOCOL == "smcseq":
             samtools index {output.filtered_bam}
             samtools flagstat {output.filtered_bam} > {output.filtered_flagstat}
 
-            {PYTHON} {SPLIT_BAM_BY_CB} {output.filtered_bam} {WORKDIR}/{wildcards.sample}/bam/ --threads 2
+            split_jobs={params.split_jobs}
+            if (( split_jobs > {resources.cpus_per_task} )); then
+                split_jobs={resources.cpus_per_task}
+            fi
+            split_bucket_threads={params.split_bucket_threads}
+            max_bucket_threads=$(( {resources.cpus_per_task} > 1 ? {resources.cpus_per_task} - 1 : 1 ))
+            if (( split_bucket_threads > max_bucket_threads )); then
+                split_bucket_threads=$max_bucket_threads
+            fi
+            SPLITTER={input.cb_splitter} \
+            SPLIT_JOBS="$split_jobs" \
+            BUCKET_THREADS="$split_bucket_threads" \
+            SPLIT_HEADROOM_GB={params.storage_headroom_gb} \
+            SPLIT_FALLBACK_TMPDIR={WORKDIR}/{wildcards.sample}/tmp/cb_split \
+            {input.cb_splitter_wrapper} \
+                {output.filtered_bam} {WORKDIR}/{wildcards.sample}/bam/
             find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
-                | parallel -j {resources.cpus_per_task} samtools index
+                | parallel -j {resources.cpus_per_task} samtools index -c
             find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '[0-9][0-9][0-9][0-9].bam' \
                 -printf '%f\\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
             """
@@ -397,6 +688,7 @@ if PROTOCOL == "smcseq":
 rule dna_biscuit_pileup:
     input:
         align_txt = WORKDIR + "/{sample}/align_list.txt",
+        mergecg_context = MERGECG_CONTEXT,
     output:
         cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
         idx       = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
@@ -405,14 +697,16 @@ rule dna_biscuit_pileup:
         ## anywhere. mqc_curated consumes this directly; it replaces
         ## a separate feature_CH / Dinuc-bed intersection pass.
         conv_rate = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
+    threads: DNA_PILEUP_CPUS
     resources:
-        mem = "80G",
+        mem = config.get("DNA_PILEUP_MEM", "80G"),
         time = "48:00:00",
-        cpus_per_task = 48,
+        cpus_per_task = threads,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         cpg_bed   = os.path.join(REF_DIR, ref["REF_BASE"], ref["CPG_BED"]),
-        pileup_threads_per_cell = int(config.get("PILEUP_THREADS_PER_CELL", 4)),
+        pileup_threads_per_cell = PILEUP_THREADS_PER_CELL,
+        pileup_window_step = PILEUP_WINDOW_STEP,
     shell:
         """
         set -xeo pipefail
@@ -421,12 +715,17 @@ rule dna_biscuit_pileup:
         tmp_pileup={WORKDIR}/{wildcards.sample}/tmp/pileup/
         mkdir -p $tmp_pileup
         pileup_threads={params.pileup_threads_per_cell}
+        if (( pileup_threads > {resources.cpus_per_task} )); then
+            pileup_threads={resources.cpus_per_task}
+        fi
         pileup_jobs=$(( {resources.cpus_per_task} / pileup_threads ))
         if [[ $pileup_jobs -lt 1 ]]; then pileup_jobs=1; fi
 
         export tmp_pileup pileup_threads
-        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 -name '*.bam' -type f | sort | \
+        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 \
+            -name '[0-9][0-9][0-9][0-9].bam' -type f | sort | \
             parallel --halt soon,fail=1 -j "$pileup_jobs" '
+                set -o pipefail
                 bam={{}}
                 barcode=$(basename "$bam" .bam)
                 out_vcf="$tmp_pileup/$barcode.vcf.gz"
@@ -434,19 +733,15 @@ rule dna_biscuit_pileup:
                         tabix -l "$out_vcf" >/dev/null 2>&1; then
                     exit 0
                 fi
-                raw_vcf="$tmp_pileup/$barcode.raw.vcf.$$"
                 tmp_vcf="$out_vcf.tmp.$$"
-                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" {params.ref_fasta} "$bam" \
-                    > "$raw_vcf"
-                {{
-                    awk '"'"'/^#/ {{ print }}'"'"' "$raw_vcf"
-                    awk '"'"'!/^#/ {{ print }}'"'"' "$raw_vcf" | \
-                        LC_ALL=C sort -k1,1V -k2,2n
-                }} | bgzip -c > "$tmp_vcf"
+                trap '"'"'rm -f "$tmp_vcf" "$tmp_vcf.tbi"'"'"' EXIT
+                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" \
+                    -s {params.pileup_window_step} {params.ref_fasta} "$bam" \
+                    | bgzip -c > "$tmp_vcf"
                 tabix -p vcf "$tmp_vcf"
                 mv "$tmp_vcf" "$out_vcf"
                 mv "$tmp_vcf.tbi" "$out_vcf.tbi"
-                rm -f "$raw_vcf"
+                trap - EXIT
             '
 
         ## Per-cell processing: emit the cell's .cg AND its CA/CC/CG/CT
@@ -456,7 +751,9 @@ rule dna_biscuit_pileup:
         expected_cpg_rows=$(zcat {params.cpg_bed} | wc -l)
         export expected_cpg_rows
         process_cell() {{
+            set -o pipefail
             local vcf=$1 base out_dir cg_out conv_out cg_tmp conv_tmp actual_rows
+            local context_fifo conv_pid main_status conv_status
             base=$(basename "$vcf" .vcf.gz)
             out_dir=$(dirname "$vcf")
             cg_out="$out_dir/$base.cg"
@@ -469,28 +766,56 @@ rule dna_biscuit_pileup:
             fi
             cg_tmp="$cg_out.tmp.$$"
             conv_tmp="$conv_out.tmp.$$"
-            biscuit vcf2bed -k 1 -t cg "$vcf" | cut -f1-5 | \
+            context_fifo="$out_dir/$base.context.fifo.$$"
+            rm -f "$context_fifo"
+            mkfifo "$context_fifo"
+            cleanup_cell() {{
+                if [[ -n ${{conv_pid:-}} ]]; then
+                    kill "$conv_pid" 2>/dev/null || true
+                fi
+                rm -f "$context_fifo" "$cg_tmp" "$conv_tmp"
+            }}
+            trap cleanup_cell EXIT
+
+            {{
+                awk -F"\\t" '
+                    {{ sum[$6] += $8; cnt[$6] += 1 }}
+                    END {{
+                        for (c in sum) printf "%s\\t%.6f\\t%d\\n", c, sum[c], cnt[c]
+                    }}' < "$context_fifo" | LC_ALL=C sort > "$conv_tmp"
+            }} &
+            conv_pid=$!
+
+            set +e
+            biscuit vcf2bed -e -t c "$vcf" | \
+                tee "$context_fifo" | \
+                awk -F"\\t" '$5 == "CG"' | \
                 LC_ALL=C sort -k1,1 -k2,2n | \
-                biscuit mergecg {params.ref_fasta} - | \
+                {input.mergecg_context} - | \
                 bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
                 awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
                     -e '{{ M=round($7*$8); print M,$8-M;}}' | \
                 {YAME} pack -f 3 - > "$cg_tmp"
+            main_status=$?
+            wait "$conv_pid"
+            conv_status=$?
+            conv_pid=
+            set -e
+            rm -f "$context_fifo"
+            if (( main_status != 0 || conv_status != 0 )); then
+                echo "Cell conversion failed for $base: CpG=$main_status conversion=$conv_status" >&2
+                rm -f "$cg_tmp" "$conv_tmp"
+                return 1
+            fi
             actual_rows=$({YAME} info "$cg_tmp" | awk -F"\\t" 'NR == 2 {{ print $4 }}')
             if [[ "$actual_rows" != "$expected_cpg_rows" ]]; then
                 echo "Invalid CpG dimensions for $base: $actual_rows != $expected_cpg_rows" >&2
                 rm -f "$cg_tmp" "$conv_tmp"
                 return 1
             fi
-            : > "$conv_tmp"
-            biscuit vcf2bed -e -t c "$vcf" | \
-                awk -F"\\t" -v out="$conv_tmp" '
-                    {{ sum[$6] += $8; cnt[$6] += 1 }}
-                    END {{
-                        for (c in sum) printf "%s\\t%.6f\\t%d\\n", c, sum[c], cnt[c] > out
-                    }}'
             mv "$cg_tmp" "$cg_out"
             mv "$conv_tmp" "$conv_out"
+            trap - EXIT
         }}
         export -f process_cell
         parallel --halt soon,fail=1 -j {resources.cpus_per_task} \
@@ -556,6 +881,8 @@ else:
         biscuit align {LAMBDA_BISCUIT_INDEX} -b 1 -@ {resources.cpus_per_task} {input.r2} {input.r1}"""
     _LAMBDA_DUPSIFTER_MODE = ""
 
+_LAMBDA_ALIGN_INPUTS["dupsifter"] = DUPSIFTER
+
 rule dna_biscuit_align_lambda:
     input:
         **_LAMBDA_ALIGN_INPUTS,
@@ -564,19 +891,27 @@ rule dna_biscuit_align_lambda:
         bai      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
         flagstat = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
         dup      = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.dupsifter.stat",
+    threads: LAMBDA_ALIGN_CPUS
     resources:
         mem = "54G",
         time = "24:00:00",
-        cpus_per_task = 48,
+        cpus_per_task = threads,
+    params:
+        sort_threads = LAMBDA_ALIGN_SORT_CPUS,
     shell:
         """
-        set -xe
+        set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/bam_lambda/
+        sort_threads={params.sort_threads}
+        if (( sort_threads > {resources.cpus_per_task} )); then
+            sort_threads={resources.cpus_per_task}
+        fi
         """ + _LAMBDA_ALIGN_COMMAND + """ | \
-            dupsifter """ + _LAMBDA_DUPSIFTER_MODE + """ --stats-output {output.dup} {LAMBDA_REF_FASTA} | \
-            samtools sort -@ 24 -T {output.bam}_tmp -O bam -o {output.bam}
-        samtools index {output.bam}
-        samtools flagstat {output.bam} > {output.flagstat}
+            {input.dupsifter} """ + _LAMBDA_DUPSIFTER_MODE + """ --uncompressed-bam \
+                --stats-output {output.dup} {LAMBDA_REF_FASTA} - | \
+            samtools sort -@ "$sort_threads" -T {output.bam}_tmp \
+                --write-index -O bam -o {output.bam}##idx##{output.bai}
+        samtools flagstat -@ "$sort_threads" {output.bam} > {output.flagstat}
         """
 
 # CpG and non-CpG pileup on lambda BAM; allc.bed enables conversion efficiency calculation.
@@ -589,10 +924,11 @@ rule dna_biscuit_pileup_lambda:
         tbi  = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda.vcf.gz.tbi",
         allc = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda_allc.bed",
         cg   = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
+    threads: 4
     resources:
         mem = config.get("LAMBDA_PILEUP_MEM", "64G"),
         time = "24:00:00",
-        cpus_per_task = 4,
+        cpus_per_task = threads,
     shell:
         """
         set -xe
@@ -620,29 +956,80 @@ rule dna_biscuit_align_unmatched:
     input:
         r1 = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R1.fq.gz",
         r2 = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
+        dupsifter = DUPSIFTER,
     output:
         bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
         bai      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam.bai",
         flagstat = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam.flagstat",
         dup      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.dupsifter.stat",
+    threads: UNMATCHED_ALIGN_CPUS
     resources:
-        mem = config.get("UNMATCHED_ALIGN_MEM", "180G"),
-        time = config.get("UNMATCHED_ALIGN_TIME", "96:00:00"),
-        cpus_per_task = int(config.get("UNMATCHED_ALIGN_CPUS", 48)),
+        mem = config.get("UNMATCHED_ALIGN_MEM", "400G"),
+        time = config.get("UNMATCHED_ALIGN_TIME", "120:00:00"),
+        cpus_per_task = threads,
     params:
         biscuit_index = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_INDEX"]),
         ref_fasta     = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
-        sort_threads  = int(config.get("UNMATCHED_SORT_CPUS", 12)),
+        sort_threads  = UNMATCHED_SORT_CPUS,
+        sort_mem      = config.get("UNMATCHED_SORT_MEM", "1G"),
+        local_min_gb  = SORT_LOCAL_MIN_GB,
+        local_input_factor = SORT_LOCAL_INPUT_FACTOR,
+        local_headroom_gb = SORT_LOCAL_HEADROOM_GB,
+        storage_headroom_gb = STORAGE_HEADROOM_GB,
     shell:
         """
         set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/bam_unmatched/
+
+        sort_root="${{SLURM_TMPDIR:-/tmp}}"
+        available_kb=$(df --output=avail -k "$sort_root" | tail -1)
+        sort_input_bytes=$(stat -Lc %s {input.r1} {input.r2} \
+            | awk '{{sum += $1}} END {{print sum}}')
+        estimated_bam_kb=$((sort_input_bytes * {params.local_input_factor} / 1024))
+        required_kb=$((
+            estimated_bam_kb
+            + {params.local_headroom_gb} * 1024 * 1024
+        ))
+        minimum_kb=$(( {params.local_min_gb} * 1024 * 1024 ))
+        if (( required_kb < minimum_kb )); then required_kb=$minimum_kb; fi
+        if (( available_kb >= required_kb )); then
+            sort_tmp="$sort_root/spatialdmt-${{SLURM_JOB_ID:-$$}}-{wildcards.sample}-unmatched"
+            sort_on_output=0
+        else
+            sort_tmp="{output.bam}.sorttmp-${{SLURM_JOB_ID:-$$}}"
+            sort_on_output=1
+        fi
+        sort_device=$(stat -c %d "$sort_root")
+        output_device=$(stat -c %d {WORKDIR}/{wildcards.sample}/bam_unmatched)
+        if [[ $sort_device == "$output_device" ]]; then sort_on_output=1; fi
+        output_available_kb=$(df --output=avail -k {WORKDIR}/{wildcards.sample}/bam_unmatched | tail -1)
+        output_required_kb=$((
+            estimated_bam_kb
+            + {params.storage_headroom_gb} * 1024 * 1024
+        ))
+        if (( sort_on_output )); then
+            output_required_kb=$((output_required_kb + estimated_bam_kb))
+        fi
+        if (( output_available_kb < output_required_kb )); then
+            echo "alignment output/sort needs about $output_required_kb KiB; $output_available_kb KiB available" >&2
+            exit 1
+        fi
+        echo "sort scratch: $sort_tmp (available_kb=$available_kb required_kb=$required_kb)" >&2
+        mkdir -p "$sort_tmp"
+        trap 'rm -rf "$sort_tmp"' EXIT
+
+        sort_threads={params.sort_threads}
+        if (( sort_threads > {resources.cpus_per_task} )); then
+            sort_threads={resources.cpus_per_task}
+        fi
         biscuit align {params.biscuit_index} -b 1 -@ {resources.cpus_per_task} \
             {input.r2} {input.r1} \
-        | {DUPSIFTER} --stats-output {output.dup} {params.ref_fasta} - \
-        | samtools sort -@ {params.sort_threads} -T {output.bam}_tmp -O bam -o {output.bam} -
-        samtools index {output.bam}
-        samtools flagstat {output.bam} > {output.flagstat}
+        | {input.dupsifter} --uncompressed-bam \
+            --stats-output {output.dup} {params.ref_fasta} - \
+        | samtools sort -@ "$sort_threads" -m {params.sort_mem} \
+            -T "$sort_tmp/sort" --write-index -O bam \
+            -o {output.bam}##idx##{output.bai} -
+        samtools flagstat -@ "$sort_threads" {output.bam} > {output.flagstat}
         """
 
 ################################################################################
@@ -679,10 +1066,11 @@ if PROTOCOL == "smcseq":
             primer_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.primer.txt",
             linker1_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker1.txt",
             linker2_stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker2.txt",
+        threads: 1
         resources:
             mem = "20G",
             time = "12:00:00",
-            cpus_per_task = 1,
+            cpus_per_task = threads,
         shell:
             """
             {PYTHON} {workflow.basedir}/../tools/smcseq_rna_process.py \
@@ -704,10 +1092,11 @@ else:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_primer.fastq.gz",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_primer.fastq.gz",
             stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.primer.txt",
+        threads: 12
         resources:
             mem = "20G",
             time = "12:00:00",
-            cpus_per_task = 12,
+            cpus_per_task = threads,
         shell:
             """
             mkdir -p {WORKDIR}/{wildcards.sample}/tmp/rna_processed/ \
@@ -729,10 +1118,11 @@ else:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker1.fastq.gz",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker1.fastq.gz",
             stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker1.txt",
+        threads: 12
         resources:
             mem = "20G",
             time = "12:00:00",
-            cpus_per_task = 12,
+            cpus_per_task = threads,
         shell:
             """
             {bbduk} \
@@ -752,10 +1142,11 @@ else:
             out1 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R1_filtered_linker2.fastq",
             out2 = WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
             stats = WORKDIR + "/{sample}/rna_bbduk/{sample}_stats.linker2.txt",
+        threads: 12
         resources:
             mem = "20G",
             time = "12:00:00",
-            cpus_per_task = 12,
+            cpus_per_task = threads,
         shell:
             """
             {bbduk} \
@@ -773,10 +1164,11 @@ else:
             WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_filtered_linker2.fastq.gz",
         output:
             WORKDIR + "/{sample}/tmp/rna_processed/{sample}_R2_processed.fastq",
+        threads: 1
         resources:
             mem = "8G",
             time = "4:00:00",
-            cpus_per_task = 1,
+            cpus_per_task = threads,
         shell:
             """
             {PYTHON} {workflow.basedir}/../tools/fastq_process.py --input {input} --output {output}
@@ -795,10 +1187,11 @@ rule rna_star_solo:
         raw_matrix    = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/matrix.mtx",
         raw_barcodes  = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/raw/barcodes.tsv",
         summary       = WORKDIR + "/{sample}/rna_STAR/Solo.out/GeneFull/Summary.csv",
+    threads: 24
     resources:
         mem = "100G",
         time = "24:00:00",
-        cpus_per_task = 24,
+        cpus_per_task = threads,
     shell:
         """
         if command -v module >/dev/null 2>&1; then module load STAR || true; fi
@@ -833,10 +1226,11 @@ rule mqc_biscuit:
         bam = DNA_QC_MERGED_BAM,
     output:
         mapq = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_mapq_table.txt",
+    threads: 2
     resources:
         mem = "12G",
         time = "4:00:00",
-        cpus_per_task = 2,
+        cpus_per_task = threads,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         assets    = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_QCASSET"]),
@@ -862,10 +1256,11 @@ rule mqc_unmatched_biscuit:
         bam = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
     output:
         flag = WORKDIR + "/{sample}/qc/biscuit_qc_unmatched/.done",
+    threads: 4
     resources:
         mem = "16G",
         time = "8:00:00",
-        cpus_per_task = 4,
+        cpus_per_task = threads,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         assets    = os.path.join(REF_DIR, ref["REF_BASE"], ref["BISCUIT_QCASSET"]),
@@ -897,10 +1292,11 @@ rule mqc_unmatched_diagnostics:
     output:
         tsv         = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
         mqc_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
+    threads: 24
     resources:
         mem = "8G",
         time = config.get("UNMATCHED_DIAGNOSTICS_TIME", "12:00:00"),
-        cpus_per_task = 24,
+        cpus_per_task = threads,
     shell:
         """
         set -xeo pipefail
@@ -935,10 +1331,11 @@ rule mqc_curated:
         lambda_cg        = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
     output:
         mqc = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_curated_metrics_mqc.tsv",
+    threads: 1
     resources:
         mem = "4G",
         time = "1:00:00",
-        cpus_per_task = 1,
+        cpus_per_task = threads,
     params:
         bsconv_log_arg = lambda wc: (
             f"--bsconv-log {WORKDIR}/{wc.sample}/bam_merged/{wc.sample}.bsconv.log"
@@ -978,9 +1375,10 @@ rule spatial_summary:
     output:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
+    threads: 4
     resources:
         mem = "12G",
-        cpus_per_task = 4,
+        cpus_per_task = threads,
         time = "24:00:00",
     shell:
         """
@@ -1003,9 +1401,10 @@ rule rna_spatial_summary:
     output:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_rna_spatial_counts.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.rna_done",
+    threads: 1
     resources:
         mem = "8G",
-        cpus_per_task = 1,
+        cpus_per_task = threads,
     shell:
         """
         {PYTHON} {workflow.basedir}/../tools/rna_spatial_summary.py \
@@ -1048,9 +1447,10 @@ rule qc_report:
     params:
         diagnostic_rna_args = diagnostic_rna_args,
         report_rna_args = qc_report_rna_args,
+    threads: 4
     resources:
         mem = "12G",
-        cpus_per_task = 4,
+        cpus_per_task = threads,
     shell:
         """
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/html/
@@ -1102,10 +1502,11 @@ rule spatial_features:
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),
     output:
         txt = WORKDIR + "/{sample}/qc/features/{feat}.txt.gz",
+    threads: 48
     resources:
         mem = "80G",
         time = "6:00:00",
-        cpus_per_task = 48,
+        cpus_per_task = threads,
     shell:
         """
         set -xe
@@ -1199,10 +1600,11 @@ rule biscuit_pileup_allc:
         cg = WORKDIR + "/{sample}/pileup/{sample}.cg",
     output:
         allc = WORKDIR + "/{sample}/pileup/{sample}.allc",
+    threads: 45
     resources:
         mem = "250G",
         time = "168:00:00",
-        cpus_per_task = 45,
+        cpus_per_task = threads,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
         allc_bed  = os.path.join(REF_DIR, ref["REF_BASE"], ref["ALLC_BED"]),
@@ -1244,10 +1646,11 @@ rule feature_mean_allc:
         feat = os.path.join(FEATURE_DIR, "{feat}.bed.gz"),
     output:
         txt = WORKDIR + "/{sample}/qc/features_allc/{feat}.txt.gz",
+    threads: 48
     resources:
         mem = "100G",
         time = "72:00:00",
-        cpus_per_task = 48,
+        cpus_per_task = threads,
     shell:
         """
         set -xe

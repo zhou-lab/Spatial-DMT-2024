@@ -13,8 +13,8 @@ Whitelist HIT  -> spatialdmt: <prefix>_R{1,2}.fq.gz
                     UMI = 1-bp R2 UMI for smcseq, "N" placeholder for spatialdmt.
                   biscuit align -9 parses these names as second-to-last=BC,
                   last=UMI, and emits CB:Z + RX:Z SAM tags. dupsifter -B
-                  dedups per cell on the CB tag. split_bam_by_cb.py decodes
-                  the CB back to "XXYY" for the per-cell BAM name.
+                  dedups per cell on the CB tag. The compiled CB splitter
+                  decodes the CB back to "XXYY" for the per-cell BAM name.
 
 Whitelist MISS -> <prefix>_Unmatched_R{1,2}.fq.gz with the ORIGINAL read name
                   (no CB tag). These reads went through structural parse (so
@@ -23,13 +23,14 @@ Whitelist MISS -> <prefix>_Unmatched_R{1,2}.fq.gz with the ORIGINAL read name
                   by dna_biscuit_align_unmatched and QC'd separately so the
                   per-cell stats stay clean.
 
-Structure-FAIL reads (primer / linker / Tn5 ME not found) are dropped.
+Structure-FAIL reads (primer / linker / Tn5 ME not found) are written to the
+unmatched pair with an `_SF` read-name suffix.
 
 Two protocols (--protocol):
   spatialdmt — 50x50 grid, 8+8 bp barcodes (default)
   smcseq     — 96x96 grid, 11+11 bp + GGTGTAGTGGGTTTGGAGG primer prefix
 
-Outputs (one set per chunk; concatenate across chunks in the calling rule):
+Outputs (one set per input block; concatenate blocks in the calling rule):
   <prefix>_R1.fq.gz / <prefix>_R2.fq.gz             spatialdmt matched fastqs
   <prefix>_Watson_R1.fq.gz / _Crick_R1.fq.gz        smcseq matched fastqs
   <prefix>_Unmatched_R1.fq.gz / _R2.fq.gz           structure-pass + WL-miss
@@ -37,10 +38,10 @@ Outputs (one set per chunk; concatenate across chunks in the calling rule):
   <prefix>_stats.txt                                read/whitelist counters
   <prefix>_barcodes_all.txt                         observed-barcode frequency
 """
-import argparse, gzip, os, subprocess, sys
+import argparse, contextlib, gzip, os, subprocess, sys
 import regex as _regex
-from fuzzysearch import find_near_matches
 from cb_codec import coord_to_acgt8
+from fuzzy_match import MATCHERS
 
 
 def open_fastq_file(fp):
@@ -61,20 +62,49 @@ def iter_fastq(fh):
         yield rid, seq, qual
 
 
+def iter_paired_tab_fastq(fh):
+    """Yield paired records from eight tab-separated FASTQ fields per line."""
+    for line_number, line in enumerate(fh, 1):
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) != 8:
+            raise ValueError(
+                f"paired-tab input line {line_number} has {len(fields)} fields; expected 8"
+            )
+        h1, seq1, plus1, qual1, h2, seq2, plus2, qual2 = fields
+        if not h1.startswith("@") or not h2.startswith("@"):
+            raise ValueError(f"paired-tab input line {line_number} lacks FASTQ headers")
+        if not plus1.startswith("+") or not plus2.startswith("+"):
+            raise ValueError(f"paired-tab input line {line_number} lacks FASTQ separators")
+        rid1 = h1[1:].split(None, 1)[0]
+        rid2 = h2[1:].split(None, 1)[0]
+        yield (rid1, seq1, qual1), (rid2, seq2, qual2)
+
+
+@contextlib.contextmanager
+def open_paired_reads(read1_path, read2_path, paired_tab_stdin=False):
+    if paired_tab_stdin:
+        yield iter_paired_tab_fastq(sys.stdin)
+        return
+    with open_fastq_file(read1_path) as r1h, open_fastq_file(read2_path) as r2h:
+        yield zip(iter_fastq(r1h), iter_fastq(r2h))
+
+
 class PigzWriter:
     """Write text records to a pigz subprocess (parallel BGZ-compatible gzip)."""
-    def __init__(self, out_path, threads=2):
+    def __init__(self, out_path, threads=2, level=6):
         self._fh = open(out_path, "wb")
         self._proc = subprocess.Popen(
-            ["pigz", "-c", "-p", str(threads)],
+            ["pigz", f"-{level}", "-c", "-p", str(threads)],
             stdin=subprocess.PIPE, stdout=self._fh,
         )
     def write(self, s):
         self._proc.stdin.write(s.encode())
     def close(self):
         self._proc.stdin.close()
-        self._proc.wait()
+        returncode = self._proc.wait()
         self._fh.close()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, self._proc.args)
 
 
 def write_fastq_record(h, rid, seq, qual_str):
@@ -122,10 +152,33 @@ def assign_barcode_hamming1(bc, wl_map, ambig_policy="drop"):
     return None, None
 
 
+def build_hamming1_lookup(wl_map, ambig_policy="drop"):
+    """Precompute observed one-mismatch barcode -> whitelist assignment."""
+    assignments = {}
+    for matched_bc in sorted(wl_map):
+        for i, original in enumerate(matched_bc):
+            for base in "ACGT":
+                if base == original:
+                    continue
+                observed = matched_bc[:i] + base + matched_bc[i + 1:]
+                if observed not in assignments:
+                    assignments[observed] = matched_bc
+                elif assignments[observed] != matched_bc and ambig_policy == "drop":
+                    assignments[observed] = None
+
+    return {
+        observed: (matched_bc, wl_map[matched_bc])
+        for observed, matched_bc in assignments.items()
+        if matched_bc is not None
+    }
+
+
 parser = argparse.ArgumentParser(description=__doc__,
     formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("read1_fastq")
 parser.add_argument("read2_fastq")
+parser.add_argument("--paired-tab-stdin", action="store_true",
+    help="read paired FASTQ records as eight tab-separated fields from stdin")
 parser.add_argument("-o", "--output_prefix", default="out")
 parser.add_argument("-a", "--adapters", nargs='+',
     default=["CTATCTCTTATA", "AGATGCGAGAAGCCAACGCTTG"])
@@ -146,8 +199,25 @@ parser.add_argument("--barcode_len", type=int, default=None,
 parser.add_argument("--bc-mismatch", type=int, default=1,
     help="allowed barcode mismatches (Hamming); 0 or 1 recommended")
 parser.add_argument("--bc-ambig", choices=["drop", "first"], default="drop")
+parser.add_argument("--compression-backend", choices=["pigz", "gzip"], default="pigz",
+    help="FASTQ output compressor (default: pigz)")
+parser.add_argument("--compression-threads", type=int, default=2,
+    help="threads per pigz output stream (default: 2; ignored for gzip)")
+parser.add_argument("--compression-level", type=int, choices=range(0, 10), default=6,
+    help="gzip compression level, 0-9 (default: 6)")
+parser.add_argument("--skip-barcode-counts", action="store_true",
+    help="do not create the optional observed-barcode frequency table")
+parser.add_argument(
+    "--matcher",
+    choices=["fuzzy", "deterministic", "seeded", "exact-seeded"],
+    default="fuzzy",
+    help="adapter/linker matcher used by spatialdmt (default: fuzzy)")
 
 args = parser.parse_args()
+if args.compression_threads < 1:
+    parser.error("--compression-threads must be at least 1")
+
+find_near_matches = MATCHERS[args.matcher]
 
 ## Protocol-specific defaults
 if args.protocol == "smcseq":
@@ -199,6 +269,10 @@ def parse_r2_smcseq(s):
 wl_map = load_whitelist_with_coords(args.whitelist, args.whitelist_col)
 if not wl_map:
     sys.exit(f"ERROR: empty whitelist from {args.whitelist} col {args.whitelist_col}")
+hamming1_lookup = (
+    build_hamming1_lookup(wl_map, args.bc_ambig)
+    if args.bc_mismatch >= 1 else {}
+)
 
 ## MATCHED reads (whitelist hit, exact or Hamming-1) get a real CB tag and go
 ## to <prefix>_R{1,2}.fq.gz for the per-cell pipeline. Structure-fail (_SF)
@@ -206,22 +280,32 @@ if not wl_map:
 ## a suffix tag in the read name -- aligned separately to bam_unmatched/ and
 ## summarised by mqc_unmatched_diagnostics. Keeps the merged BAM clean
 ## (every CB is a real coord; no sentinel cell, no dupsifter over-dedup risk).
+def open_output_writer(path):
+    if args.compression_backend == "gzip":
+        return gzip.open(path, "wt", compresslevel=args.compression_level)
+    return PigzWriter(
+        path,
+        threads=args.compression_threads,
+        level=args.compression_level,
+    )
+
+
 if args.protocol == "smcseq":
-    watson_r1_out = PigzWriter(args.output_prefix + "_Watson_R1.fq.gz")
-    crick_r1_out = PigzWriter(args.output_prefix + "_Crick_R1.fq.gz")
+    watson_r1_out = open_output_writer(args.output_prefix + "_Watson_R1.fq.gz")
+    crick_r1_out = open_output_writer(args.output_prefix + "_Crick_R1.fq.gz")
     r1_out = r2_out = None
 else:
-    r1_out = PigzWriter(args.output_prefix + "_R1.fq.gz")
-    r2_out = PigzWriter(args.output_prefix + "_R2.fq.gz")
+    r1_out = open_output_writer(args.output_prefix + "_R1.fq.gz")
+    r2_out = open_output_writer(args.output_prefix + "_R2.fq.gz")
     watson_r1_out = crick_r1_out = None
-unmatched_r1_out = PigzWriter(args.output_prefix + "_Unmatched_R1.fq.gz")
-unmatched_r2_out = PigzWriter(args.output_prefix + "_Unmatched_R2.fq.gz")
+unmatched_r1_out = open_output_writer(args.output_prefix + "_Unmatched_R1.fq.gz")
+unmatched_r2_out = open_output_writer(args.output_prefix + "_Unmatched_R2.fq.gz")
 ## Lambda spike-in detection (barcode-85 motif) only fires for spatialdmt.
 ## smcseq has no dedicated lambda barcode -- skip creating the empty files.
 WRITE_LAMBDA = (args.protocol == "spatialdmt")
 if WRITE_LAMBDA:
-    lambda_r1_out = PigzWriter(args.output_prefix + "_Lambda_R1.fq.gz")
-    lambda_r2_out = PigzWriter(args.output_prefix + "_Lambda_R2.fq.gz")
+    lambda_r1_out = open_output_writer(args.output_prefix + "_Lambda_R1.fq.gz")
+    lambda_r2_out = open_output_writer(args.output_prefix + "_Lambda_R2.fq.gz")
 else:
     lambda_r1_out = lambda_r2_out = None
 
@@ -232,7 +316,7 @@ n_reads_barcode85 = n_written_barcode85 = 0
 n_wl_exact = n_wl_hamming1 = n_wl_unmatched = 0
 n_unmatched_sf = n_unmatched_wm = 0
 n_watson = n_crick = 0
-barcode_cnt = {}
+barcode_cnt = None if args.skip_barcode_counts else {}
 
 
 def write_unmatched(rid_suffix, rid1, seq1, qual1, rid2, seq2, qual2):
@@ -242,14 +326,17 @@ def write_unmatched(rid_suffix, rid1, seq1, qual1, rid2, seq2, qual2):
     write_fastq_record(unmatched_r1_out, f"{rid1}_{rid_suffix}", seq1, qual1)
     write_fastq_record(unmatched_r2_out, f"{rid2}_{rid_suffix}", seq2, qual2)
 
-with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq) as r2h:
-    for (rid1_raw, r1seq, r1qual), (rid2_raw, r2seq, r2qual) in zip(iter_fastq(r1h), iter_fastq(r2h)):
+with open_paired_reads(
+    args.read1_fastq, args.read2_fastq, args.paired_tab_stdin
+) as read_pairs:
+    for (rid1_raw, r1seq, r1qual), (rid2_raw, r2seq, r2qual) in read_pairs:
         n_reads += 1
         is_barcode85 = BARCODE85_MOTIF in r1seq or BARCODE85_MOTIF in r2seq
         if is_barcode85:
             n_reads_barcode85 += 1
 
-        ## R1 adapter trim (fuzzysearch unchanged: byte-identical to v0)
+        ## R1 adapter trim. exact-seeded falls back to fuzzysearch unless an
+        ## exact hit is sufficient to prove the same consolidated result.
         lambda_seq1 = r1seq
         lambda_qual1 = r1qual
         hits = []
@@ -317,7 +404,8 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
         if len(seq1_for_alignment) < args.min_len or len(new_seq2) < args.min_len:
             continue
 
-        barcode_cnt[barcode] = barcode_cnt.get(barcode, 0) + 1
+        if barcode_cnt is not None:
+            barcode_cnt[barcode] = barcode_cnt.get(barcode, 0) + 1
 
         ## Whitelist lookup -> coord on hit. Unmatched reads route to a separate
         ## fastq pair (no CB tag in name) for the dna_biscuit_align_unmatched
@@ -327,7 +415,16 @@ with open_fastq_file(args.read1_fastq) as r1h, open_fastq_file(args.read2_fastq)
             coord = wl_map[barcode]
             n_wl_exact += 1
         elif args.bc_mismatch >= 1:
-            m, c = assign_barcode_hamming1(barcode, wl_map, args.bc_ambig)
+            m, c = hamming1_lookup.get(barcode, (None, None))
+            if (
+                m is None
+                and not set(barcode).issubset({"A", "C", "G", "T"})
+            ):
+                # Preserve the original behavior for N/IUPAC observations;
+                # reverse-generated ACGT neighbors cannot represent them.
+                m, c = assign_barcode_hamming1(
+                    barcode, wl_map, args.bc_ambig
+                )
             if m is not None:
                 coord = c
                 n_wl_hamming1 += 1
@@ -388,9 +485,12 @@ with open(args.output_prefix + "_stats.txt", "w") as fs:
         fs.write(f"Reads_Watson\t{n_watson}\n")
         fs.write(f"Reads_Crick\t{n_crick}\n")
 
-sorted_barcodes = sorted(barcode_cnt.items(), key=lambda x: x[1], reverse=True)
-with open(args.output_prefix + "_barcodes_all.txt", "w") as fbc:
-    if sorted_barcodes:
-        cnt_max = sorted_barcodes[0][1]
-        for bc, cnt in sorted_barcodes:
-            fbc.write("{}\t{}\t{}\n".format(bc, cnt, "T" if cnt > cnt_max/100 else "F"))
+if barcode_cnt is not None:
+    sorted_barcodes = sorted(barcode_cnt.items(), key=lambda x: x[1], reverse=True)
+    with open(args.output_prefix + "_barcodes_all.txt", "w") as fbc:
+        if sorted_barcodes:
+            cnt_max = sorted_barcodes[0][1]
+            for bc, cnt in sorted_barcodes:
+                fbc.write("{}\t{}\t{}\n".format(
+                    bc, cnt, "T" if cnt > cnt_max / 100 else "F"
+                ))
