@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose the Unmatched bucket: alignment stats by category + SF-anchor-fail
-breakdown.
+"""Diagnose the Unmatched bucket from FASTQ, with optional alignment stats.
 
 spatialmeth_trimtag.py routes everything not heading to a position cell (or to
 the spatialdmt lambda bucket) into the Unmatched fastq pair, suffixing each
@@ -9,19 +8,21 @@ qname with:
   _WM — whitelist-miss: grammar parsed cleanly but BC1+BC2 not in whitelist
         even within Hamming-1.
 
-This script reads the post-align Unmatched BAM (for per-category alignment
-stats) AND the original Unmatched R2 fastq (for the structural-anchor probe on
-SF reads), and emits a single long-format TSV. The R2 probe follows the
-protocol grammar in order and reports the FIRST stage that fails for each SF
-read -- tells you whether the unmatched bucket is dominated by primer
-failures (wrong chemistry / contamination), linker drift, or short-insert
-Tn5-readthrough.
+The original Unmatched R2 FASTQ is sufficient for SF/WM read counts and the
+structural-anchor probe on SF reads. The probe follows the protocol grammar in
+order and reports the FIRST stage that fails for each SF read, revealing
+whether the unmatched bucket is dominated by primer failures, linker drift,
+or short-insert Tn5 readthrough. A post-alignment Unmatched BAM may be supplied
+when per-category genomic mapping and duplicate rates are explicitly needed.
 
 Usage:
   unmatched_diagnostics.py --protocol smcseq \\
-      --bam      bam_unmatched/{sample}_unmatched.bam \\
       --r2-fastq trim/{sample}_Unmatched_R2.fq.gz \\
       --out      qc/unmatched_diagnostics.tsv
+
+Optional alignment metrics:
+  unmatched_diagnostics.py ... \\
+      --bam bam_unmatched/{sample}_unmatched.bam
 """
 import argparse, gzip, multiprocessing as mp, sys
 from collections import defaultdict
@@ -136,7 +137,7 @@ def _classify_sf_batch(args):
     return dict(counts), dict(overlaps)
 
 
-def _sf_seq_batches(r2_fastq, batch_size):
+def _sf_seq_batches(r2_fastq, batch_size, class_counts):
     opener = gzip.open if r2_fastq.endswith(".gz") else open
     batch = []
     with opener(r2_fastq, "rt") as f:
@@ -148,7 +149,12 @@ def _sf_seq_batches(r2_fastq, batch_size):
             f.readline(); f.readline()
             ## suffix is at the end of qname (before any whitespace)
             qname = h[1:].split(None, 1)[0]
-            if qname.rsplit("_", 1)[-1] != "SF":
+            suffix = qname.rsplit("_", 1)[-1]
+            if suffix not in ("SF", "WM"):
+                class_counts["other"] += 1
+                continue
+            class_counts[suffix] += 1
+            if suffix != "SF":
                 continue
             batch.append(seq)
             if len(batch) >= batch_size:
@@ -161,12 +167,17 @@ def _sf_seq_batches(r2_fastq, batch_size):
 def sf_anchor_breakdown(r2_fastq, protocol, threads=1, batch_size=100000):
     """For each SF read in the unmatched R2 fastq, classify which structural
     anchor was the FIRST to fail. Also count Spatial-DMT reads where all three
-    anchors have zero matches. Returns (first_failure_counts, overlap_counts)."""
+    anchors have zero matches. Returns first-failure counts, overlap counts,
+    and FASTQ-level SF/WM pair counts."""
     counts = defaultdict(int)
     overlaps = defaultdict(int)
+    class_counts = defaultdict(int)
 
     threads = max(1, threads)
-    batches = ((protocol, batch) for batch in _sf_seq_batches(r2_fastq, batch_size))
+    batches = (
+        (protocol, batch)
+        for batch in _sf_seq_batches(r2_fastq, batch_size, class_counts)
+    )
     pool = None
     if threads == 1:
         results = map(_classify_sf_batch, batches)
@@ -188,7 +199,12 @@ def sf_anchor_breakdown(r2_fastq, protocol, threads=1, batch_size=100000):
         if pool is not None:
             pool.close()
             pool.join()
-    return counts, overlaps
+    if class_counts["other"]:
+        sys.stderr.write(
+            f"WARN: {class_counts['other']} unmatched FASTQ records had an "
+            "unexpected qname suffix; excluded from diagnostics\n"
+        )
+    return counts, overlaps, class_counts
 
 
 ## Per-column MultiQC headers. `title` = short column label shown in the table
@@ -224,7 +240,7 @@ def _yq(s):
     return "'" + s.replace("'", "''") + "'"
 
 
-def _format_headers(anchor_stages):
+def _format_headers(anchor_stages, include_alignment):
     """Build the `headers:` YAML block for MultiQC custom-content table."""
     lines = ["# headers:"]
     def col(name, title, desc, fmt=None, min_=None, max_=None, scale=None, suffix=None):
@@ -237,31 +253,26 @@ def _format_headers(anchor_stages):
         if scale  is not None: lines.append(f"#         scale: {_yq(scale)}")
         if suffix is not None: lines.append(f"#         suffix: {_yq(suffix)}")
     col("sf_n_reads", "SF reads",
-        "Number of R1-primary reads in the structure-fail bucket. These are "
-        "reads whose R2 sequence didn't pass the protocol's structural-anchor "
-        "parse (see sf_fail_* columns for which anchor failed). Their R2 still "
-        "carries the structural prefix, so mapping rate against the genome is "
-        "expected to be low.",
+        "Number of read pairs in the structure-fail bucket, counted directly "
+        "from _SF records in the unmatched R2 FASTQ. These are reads whose R2 "
+        "sequence didn't pass the protocol's structural-anchor parse (see "
+        "sf_fail_* columns for which anchor failed).",
         fmt="{:,.0f}", min_=0, scale="Blues")
-    col("sf_mapping_rate", "SF map rate",
-        "Fraction of SF reads that the aligner placed against the main genome "
-        "(R1-primary, any quality). Typically near zero because the unmapped "
-        "structural prefix dominates R2. Elevated rate here would suggest the "
-        "structural parse is too strict and is dropping real library reads.",
-        fmt="{:.2%}", min_=0, max_=1, scale="Reds")
+    if include_alignment:
+        col("sf_mapping_rate", "SF map rate",
+            "Fraction of SF reads that the optional unmatched alignment placed "
+            "against the main genome (R1-primary, any quality).",
+            fmt="{:.2%}", min_=0, max_=1, scale="Reds")
     col("wm_n_reads", "WM reads",
-        "Number of R1-primary reads in the whitelist-miss bucket. Structure "
-        "parsed cleanly, but the 16/22-mer BC1+BC2 isn't in the whitelist "
-        "even within Hamming-1. R2 was genomic-trimmed before alignment, so "
-        "mapping rate should be comparable to matched cells.",
+        "Number of read pairs in the whitelist-miss bucket, counted directly "
+        "from _WM records in the unmatched R2 FASTQ. Structure parsed cleanly, "
+        "but the 16/22-mer BC1+BC2 isn't in the whitelist within Hamming-1.",
         fmt="{:,.0f}", min_=0, scale="Blues")
-    col("wm_mapping_rate", "WM map rate",
-        "Fraction of WM reads that mapped. If close to the matched-cell rate, "
-        "these are real library reads with sequencing errors >1 bp in the "
-        "barcode -- could be salvageable with a more permissive whitelist "
-        "(Hamming-2). If much lower, they're more likely off-target or "
-        "contamination.",
-        fmt="{:.2%}", min_=0, max_=1, scale="Reds")
+    if include_alignment:
+        col("wm_mapping_rate", "WM map rate",
+            "Fraction of WM reads that the optional unmatched alignment placed "
+            "against the main genome (R1-primary, any quality).",
+            fmt="{:.2%}", min_=0, max_=1, scale="Reds")
     anchor_descriptions = {s: _ANCHOR_HOVER[s] for s in anchor_stages}
     for s in anchor_stages:
         col(f"sf_fail_{s}",
@@ -273,23 +284,29 @@ def _format_headers(anchor_stages):
     return "\n".join(lines)
 
 
-def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
-    """MultiQC custom-content: single table combining per-category reads +
-    mapping_rate AND the SF anchor-fail breakdown (counts) for the sample.
-    One row per sample so the report aggregates cleanly across runs.
-    Per-column hover descriptions explain each metric in-report."""
-    sf = align.get("SF", {"n_reads": 0, "n_mapped": 0})
-    wm = align.get("WM", {"n_reads": 0, "n_mapped": 0})
-    sf_rate = (sf["n_mapped"] / sf["n_reads"]) if sf["n_reads"] else 0.0
-    wm_rate = (wm["n_mapped"] / wm["n_reads"]) if wm["n_reads"] else 0.0
+def write_mqc_summary(
+        path, sample, read_counts, sf_breakdown, protocol, align=None):
+    """Write FASTQ diagnostics and optional BAM mapping rates for MultiQC."""
     if protocol == "smcseq":
         anchor_stages = ("primer", "linker1", "linker2", "tn5_me")
     else:
         anchor_stages = ("linker1", "linker2", "tn5_me")
-    cols = ["sf_n_reads", "sf_mapping_rate", "wm_n_reads", "wm_mapping_rate"] \
-         + [f"sf_fail_{s}" for s in anchor_stages]
-    vals = [sf["n_reads"], f"{sf_rate:.4f}", wm["n_reads"], f"{wm_rate:.4f}"] \
-         + [sf_breakdown.get(s, 0) for s in anchor_stages]
+    cols = ["sf_n_reads"]
+    vals = [read_counts.get("SF", 0)]
+    if align is not None:
+        sf = align.get("SF", {"n_reads": 0, "n_mapped": 0})
+        sf_rate = (sf["n_mapped"] / sf["n_reads"]) if sf["n_reads"] else 0.0
+        cols.append("sf_mapping_rate")
+        vals.append(f"{sf_rate:.4f}")
+    cols.append("wm_n_reads")
+    vals.append(read_counts.get("WM", 0))
+    if align is not None:
+        wm = align.get("WM", {"n_reads": 0, "n_mapped": 0})
+        wm_rate = (wm["n_mapped"] / wm["n_reads"]) if wm["n_reads"] else 0.0
+        cols.append("wm_mapping_rate")
+        vals.append(f"{wm_rate:.4f}")
+    cols.extend(f"sf_fail_{stage}" for stage in anchor_stages)
+    vals.extend(sf_breakdown.get(stage, 0) for stage in anchor_stages)
     section_description = (
         "Per-sample summary of the Unmatched track -- the bucket of read pairs "
         "that didn't make it onto a spatial-position cell or into the lambda "
@@ -301,6 +318,11 @@ def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
         "stage that failed during the sequential parse, telling you whether "
         "the unmatched bucket is primer/linker noise or just short-insert "
         "fragments where R2 reads past the genomic end.")
+    if align is not None:
+        section_description += (
+            " Optional SF/WM genomic mapping rates were calculated from the "
+            "supplied unmatched BAM."
+        )
     with open(path, "w") as f:
         f.write(f"# id: {_yq('unmatched_summary')}\n")
         f.write(f"# section_name: {_yq('Unmatched bucket')}\n")
@@ -309,7 +331,7 @@ def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
         f.write("# pconfig:\n")
         f.write(f"#     id: {_yq('unmatched_summary_table')}\n")
         f.write(f"#     title: {_yq('Unmatched bucket: read disposition and SF anchor-fail breakdown')}\n")
-        f.write(_format_headers(anchor_stages) + "\n")
+        f.write(_format_headers(anchor_stages, align is not None) + "\n")
         f.write("Sample\t" + "\t".join(cols) + "\n")
         f.write(f"{sample}\t" + "\t".join(str(v) for v in vals) + "\n")
 
@@ -317,7 +339,10 @@ def write_mqc_summary(path, sample, align, sf_breakdown, protocol):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bam",      required=True)
+    ap.add_argument(
+        "--bam",
+        help="optional unmatched BAM for SF/WM mapping and duplicate rates",
+    )
     ap.add_argument("--r2-fastq", required=True)
     ap.add_argument("--protocol", required=True, choices=["smcseq", "spatialdmt"])
     ap.add_argument("--sample",   required=True, help="sample name for MultiQC")
@@ -330,27 +355,46 @@ def main():
                     help="SF reads per worker batch")
     args = ap.parse_args()
 
-    align = bam_align_stats(args.bam, threads=args.threads)
-    sf_breakdown, sf_overlaps = sf_anchor_breakdown(
+    align = (
+        bam_align_stats(args.bam, threads=args.threads)
+        if args.bam
+        else None
+    )
+    sf_breakdown, sf_overlaps, read_counts = sf_anchor_breakdown(
         args.r2_fastq, args.protocol, threads=args.threads,
         batch_size=args.batch_size)
 
     with open(args.out, "w") as f:
         f.write("section\tkey\tvalue\n")
-        ## align stats per category (long-format raw -- keeps mapped + dup for
-        ## the curious; the MultiQC view only surfaces reads + mapping_rate).
-        for cat_name, sx in [("structure_fail", "SF"), ("wl_miss", "WM")]:
-            c = align.get(sx, {"n_reads": 0, "n_mapped": 0, "n_dup": 0})
-            n, m, d = c["n_reads"], c["n_mapped"], c["n_dup"]
-            f.write(f"align_stats\t{cat_name}_n_reads\t{n}\n")
-            f.write(f"align_stats\t{cat_name}_n_mapped\t{m}\n")
-            f.write(f"align_stats\t{cat_name}_mapping_rate\t{m/n if n else 0:.4f}\n")
-            f.write(f"align_stats\t{cat_name}_n_dup\t{d}\n")
-            f.write(f"align_stats\t{cat_name}_dup_rate\t{d/m if m else 0:.4f}\n")
-        total_reads = sum(align[s]["n_reads"] for s in align)
-        total_mapped = sum(align[s]["n_mapped"] for s in align)
-        f.write(f"align_stats\ttotal_n_reads\t{total_reads}\n")
-        f.write(f"align_stats\ttotal_mapping_rate\t{total_mapped/total_reads if total_reads else 0:.4f}\n")
+        sf_reads = read_counts["SF"]
+        wm_reads = read_counts["WM"]
+        f.write(f"fastq_stats\tstructure_fail_n_reads\t{sf_reads}\n")
+        f.write(f"fastq_stats\twl_miss_n_reads\t{wm_reads}\n")
+        f.write(f"fastq_stats\ttotal_n_reads\t{sf_reads + wm_reads}\n")
+        if align is not None:
+            ## Keep mapped and duplicate fields only when a BAM was supplied.
+            for cat_name, sx in [("structure_fail", "SF"), ("wl_miss", "WM")]:
+                c = align.get(
+                    sx, {"n_reads": 0, "n_mapped": 0, "n_dup": 0})
+                n, m, d = c["n_reads"], c["n_mapped"], c["n_dup"]
+                f.write(f"align_stats\t{cat_name}_n_reads\t{n}\n")
+                f.write(f"align_stats\t{cat_name}_n_mapped\t{m}\n")
+                f.write(
+                    f"align_stats\t{cat_name}_mapping_rate\t"
+                    f"{m/n if n else 0:.4f}\n"
+                )
+                f.write(f"align_stats\t{cat_name}_n_dup\t{d}\n")
+                f.write(
+                    f"align_stats\t{cat_name}_dup_rate\t"
+                    f"{d/m if m else 0:.4f}\n"
+                )
+            total_reads = sum(align[s]["n_reads"] for s in align)
+            total_mapped = sum(align[s]["n_mapped"] for s in align)
+            f.write(f"align_stats\ttotal_n_reads\t{total_reads}\n")
+            f.write(
+                "align_stats\ttotal_mapping_rate\t"
+                f"{total_mapped/total_reads if total_reads else 0:.4f}\n"
+            )
         ## SF anchor-fail breakdown
         total_sf = sum(sf_breakdown.values())
         for stage in ("primer", "linker1", "linker2", "tn5_me", "all_ok"):
@@ -368,11 +412,27 @@ def main():
                 f"{all_three_absent/total_sf if total_sf else 0:.4f}\n"
             )
 
-    write_mqc_summary(args.mqc_summary, args.sample, align, sf_breakdown, args.protocol)
+    if align is not None:
+        for suffix in ("SF", "WM"):
+            bam_reads = align.get(suffix, {}).get("n_reads", 0)
+            if bam_reads != read_counts[suffix]:
+                sys.stderr.write(
+                    f"WARN: {suffix} count differs between FASTQ "
+                    f"({read_counts[suffix]}) and BAM ({bam_reads})\n"
+                )
+
+    write_mqc_summary(
+        args.mqc_summary,
+        args.sample,
+        read_counts,
+        sf_breakdown,
+        args.protocol,
+        align=align,
+    )
 
     sys.stderr.write(
         f"wrote {args.out}, {args.mqc_summary}\n"
-        f"  SF={align['SF']['n_reads']} reads, WM={align['WM']['n_reads']} reads\n"
+        f"  SF={read_counts['SF']} pairs, WM={read_counts['WM']} pairs\n"
         f"  SF anchor-fail: {dict(sf_breakdown)}\n")
 
 

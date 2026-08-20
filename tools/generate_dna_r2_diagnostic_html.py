@@ -307,8 +307,20 @@ def genomic_total(trim):
 def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
     total = genomic_total(trim)
     wl_unmatched = trim.get("WL_unmatched", 0)
-    sf_reads = trim.get("Unmatched_SF", unmatched.get(("align_stats", "structure_fail_n_reads"), 0))
-    wm_reads = trim.get("Unmatched_WM", unmatched.get(("align_stats", "wl_miss_n_reads"), 0))
+    sf_reads = trim.get(
+        "Unmatched_SF",
+        unmatched.get(
+            ("fastq_stats", "structure_fail_n_reads"),
+            unmatched.get(("align_stats", "structure_fail_n_reads"), 0),
+        ),
+    )
+    wm_reads = trim.get(
+        "Unmatched_WM",
+        unmatched.get(
+            ("fastq_stats", "wl_miss_n_reads"),
+            unmatched.get(("align_stats", "wl_miss_n_reads"), 0),
+        ),
+    )
 
     sf_linker1 = unmatched.get(("sf_anchor_fail", "linker1_fail_n"), 0)
     sf_linker2 = unmatched.get(("sf_anchor_fail", "linker2_fail_n"), 0)

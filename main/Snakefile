@@ -1279,15 +1279,39 @@ rule mqc_unmatched_biscuit:
         """
 
 
-## Diagnose the unmatched bucket. Emits two files:
+## Diagnose the unmatched bucket directly from R2 FASTQ. Alignment is opt-in:
+## set UNMATCHED_DIAGNOSTICS_WITH_BAM=true only when SF/WM genomic mapping and
+## duplicate rates are required.
+UNMATCHED_DIAGNOSTICS_WITH_BAM = str(
+    config.get("UNMATCHED_DIAGNOSTICS_WITH_BAM", "false")
+).lower() in {"1", "true", "yes", "on"}
+
+def unmatched_diagnostics_bam(wildcards):
+    if not UNMATCHED_DIAGNOSTICS_WITH_BAM:
+        return []
+    return (
+        f"{WORKDIR}/{wildcards.sample}/bam_unmatched/"
+        f"{wildcards.sample}_unmatched.bam"
+    )
+
+def unmatched_diagnostics_bam_arg(wildcards):
+    if not UNMATCHED_DIAGNOSTICS_WITH_BAM:
+        return ""
+    return (
+        f"--bam {WORKDIR}/{wildcards.sample}/bam_unmatched/"
+        f"{wildcards.sample}_unmatched.bam"
+    )
+
+## Emits two files:
 ##   - tsv: long-format raw breakdown (section, key, value) for human/scripts
 ##   - mqc_summary: single MultiQC custom-content table -- per-sample row with
-##     SF/WM reads + mapping rates AND SF anchor-fail breakdown counts
+##     SF/WM reads and SF anchor-fail breakdown counts. Mapping fields are
+##     included only when UNMATCHED_DIAGNOSTICS_WITH_BAM is enabled.
 ## The _mqc.tsv lands under qc/biscuit_qc_merged/ which the qc_report rule's
 ## multiqc invocation scans -- it automatically appears in the report.
 rule mqc_unmatched_diagnostics:
     input:
-        bam      = WORKDIR + "/{sample}/bam_unmatched/{sample}_unmatched.bam",
+        bam      = unmatched_diagnostics_bam,
         r2_fastq = WORKDIR + "/{sample}/trim/{sample}_Unmatched_R2.fq.gz",
     output:
         tsv         = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
@@ -1297,12 +1321,14 @@ rule mqc_unmatched_diagnostics:
         mem = "8G",
         time = config.get("UNMATCHED_DIAGNOSTICS_TIME", "12:00:00"),
         cpus_per_task = threads,
+    params:
+        bam_arg = unmatched_diagnostics_bam_arg,
     shell:
         """
         set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/biscuit_qc_merged/
         {PYTHON} {workflow.basedir}/../tools/unmatched_diagnostics.py \
-            --bam {input.bam} \
+            {params.bam_arg} \
             --r2-fastq {input.r2_fastq} \
             --protocol {PROTOCOL} \
             --sample {wildcards.sample} \
