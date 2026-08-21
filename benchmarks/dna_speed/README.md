@@ -338,6 +338,57 @@ Native failure tests also passed: dupsifter returned nonzero for `/dev/full`
 and truncated BAM input, the C splitter rejected truncated BAM input, and the
 context merger rejected malformed input and failed writes.
 
+## Completed real shallow sample
+
+`SpMETSLE10D` completed from raw FASTQs through copied final QC on 2026-08-20
+using commit `c896544`, a 20-CPU controller ledger, and 20 CPUs for each heavy
+DNA rule. The controller ran for 3:24:58; the interval from the first Slurm job
+starting through both alignment branches was 37:23, and unmatched diagnostics
+finished at 38:58. The run processed 14,199,274 raw pairs, retained 9,168,847
+pairs, produced exactly 18,337,694 primary matched-BAM records, passed
+`samtools quickcheck`, and produced 2,500 cell BAMs with 2,500 CSI and zero BAI
+indexes. The final QC report is present. Pileup and downstream time are excluded
+from this speed comparison because this run was not the validation run for the
+final pileup changes.
+
+There is no retained pre-optimization run of the same sample. The closest valid
+pre-optimization comparator is `SpMETSLB16D`, run on 2026-07-04 with 24,573,333
+raw pairs and the same 2,500-cell layout. It used 48 CPUs for trim, matched
+alignment, 24 CPUs for unmatched alignment, and ran matched and unmatched
+branches concurrently. The table therefore reports both wall
+throughput and CPU efficiency rather than treating raw wall ratios as
+algorithmic gains.
+
+| Stage | Optimized 10D | Old 16D comparator | Input-normalized result |
+|---|---:|---:|---:|
+| Trim/tag | 2m20s, 20 CPUs | 55m30s, 48 CPUs | 13.74x pair throughput; 3.01x pairs/CPU-second |
+| Matched align/dedup/sort/split | 15m16s, 20 CPUs | 19m13s, 48 CPUs | 0.66x pair throughput; 1.22x pairs/CPU-second |
+| Unmatched align/dedup/sort | 16m23s, 20 CPUs | 19m41s, 24 CPUs | 0.80x pair throughput; 0.98x pairs/CPU-second |
+| Unmatched diagnostics | 1m18s, 20 CPUs | 22m16s, 2 CPUs | 11.37x pair throughput; 0.95x pairs/CPU-second |
+| Trim through both alignments | 37m23s | 1h17m37s | 52% less wall; 1.20x raw-pair throughput |
+| Trim through unmatched diagnostics | 38m58s | 1h38m17s | 60% less wall; 1.46x raw-pair throughput |
+
+The real trim result confirms the optimization: despite 58% fewer allocated
+CPUs, it processed raw pairs 13.74x faster than the closest old sample. The
+diagnostics wall gain came almost entirely from raising allocation from two to
+20 CPUs. The shallow alignment branches did not improve input-normalized wall
+throughput at the tested allocations; only matched alignment showed a modest
+22% CPU-efficiency gain. The deep dupsifter hash improvement is not expected to
+dominate a shallow run where BISCUIT remains the main cost.
+
+The closest old comparator shows a real 1.20x input-normalized front-end
+throughput gain through both alignment branches. Extending the endpoint through
+unmatched diagnostics gives 1.46x, but that larger number includes the 10x
+diagnostics CPU-allocation increase. The larger old `SpMETSLE15D` comparator
+gives 1.00x through alignment and 1.02x through diagnostics after raw-input
+normalization, so the defensible observed whole-front-end gain is approximately
+1.0-1.2x before diagnostics rather than the component-level trim gain.
+
+The intended 144-CPU production layout would run matched and unmatched 69-CPU
+branches concurrently. Those production-count gains remain projections; this
+20-CPU serialized run must not be cited as validation of them. Pileup must be
+measured separately after its final changes are applied.
+
 ## Deep-run estimate
 
 The matcher result projects to about 160-165 CPU-hours for 21DM's 6.01 billion

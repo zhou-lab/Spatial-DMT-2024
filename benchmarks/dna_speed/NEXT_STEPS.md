@@ -17,13 +17,16 @@ production job merely to obtain benchmark capacity.
    is currently an extrapolation from 20-thread fixed input and historical
    24/48-thread runs.
 
-2. **Complete a real shallow sample, then one optimized deep sample.** The
-   closeout launches a real shallow SpMET sample only far enough to rule out
-   startup/integration failures. Let that sample finish and compare trim
-   statistics, primary mapping, duplicate statistics, CpG dimensions, and QC
-   metrics with its previous pipeline run. Then rerun 21DM or 23DM from trim
-   through final QC using the live capacity helper and retain per-rule Slurm
-   accounting. This is required before replacing the production branch.
+2. **Run one optimized deep sample.** The real shallow `SpMETSLE10D` run
+   completed through final QC at commit `c896544`; results and its closest old
+   comparator are recorded in `README.md`. It validated a large trim gain but
+   showed only about 1.0-1.2x input-normalized throughput improvement through
+   both alignment branches under its 20-CPU serialized ledger. Its pileup time
+   is excluded because that run was not the validation run for the final pileup
+   changes. Rerun 21DM or 23DM from trim through final QC using the live capacity
+   helper, concurrent 69-CPU matched/unmatched branches when the QOS permits,
+   and the revised pileup implementation. Retain per-rule Slurm accounting.
+   This is required before replacing the production branch.
 
 3. **Distribute per-cell pileup across two nodes.** Refactor the monolithic
    pileup rule into a checkpoint plus moderate batches (roughly 10-25 cells per
