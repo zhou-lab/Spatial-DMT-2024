@@ -160,7 +160,7 @@ rule final_output:
 ##   2. dna_biscuit_align: one biscuit align -9 → dupsifter -B (cell-aware,
 ##      BS-correct) → samtools sort → split BAM by CB:Z tag into bam/XXYY.bam.
 ##      Every CB is a real whitelist coord (no sentinel cell).
-##   3. dna_biscuit_pileup: per-cell pileup over bam/*.bam; also emits
+##   3. dna_biscuit_pileup: size-balanced pileup over bam/*.bam; also emits
 ##      per-cell .conv.tsv (CA/CC/CG/CT beta sum+cnt) pooled to
 ##      sample-level _totalBaseConversionRate.txt for the curated table.
 ##
@@ -181,9 +181,17 @@ LOCAL_CB_SPLITTER_DIR = os.path.join(TOOLS_DIR, "split_bam_by_cb_hts")
 LOCAL_CB_SPLITTER = os.path.join(LOCAL_CB_SPLITTER_DIR, "split_bam_by_cb_hts")
 CB_SPLITTER = config.get("CB_SPLITTER", LOCAL_CB_SPLITTER)
 CB_SPLITTER_WRAPPER = os.path.join(TOOLS_DIR, "split_bam_by_cb_bucketed.sh")
-LOCAL_MERGECG_CONTEXT_DIR = os.path.join(TOOLS_DIR, "mergecg_context")
-LOCAL_MERGECG_CONTEXT = os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "mergecg_context")
-MERGECG_CONTEXT = config.get("MERGECG_CONTEXT", LOCAL_MERGECG_CONTEXT)
+LOCAL_CPG_TO_YAME_DIR = os.path.join(TOOLS_DIR, "cpg_to_yame")
+LOCAL_CPG_TO_YAME = os.path.join(LOCAL_CPG_TO_YAME_DIR, "cpg_to_yame")
+CPG_TO_YAME = config.get("CPG_TO_YAME", LOCAL_CPG_TO_YAME)
+PILEUP_BATCH_PLANNER = os.path.join(TOOLS_DIR, "plan_pileup_batches.py")
+PILEUP_BATCH_RUNNER = os.path.join(TOOLS_DIR, "run_biscuit_pileup_batches.sh")
+CPG_REFERENCE_BED = os.path.join(REF_DIR, ref["REF_BASE"], ref["CPG_BED"])
+CPG_COORDINATE_INDEX = os.path.join(
+    WORKDIR,
+    ".reference_cache",
+    f"{GENOME.replace(os.sep, '_')}.cpgidx",
+)
 YAME = config.get(
     "YAME",
     "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/yame",
@@ -208,8 +216,13 @@ if not 0 <= DNA_TRIM_COMPRESSION_LEVEL <= 9:
 DNA_ALIGN_CPUS = int(config.get("DNA_ALIGN_CPUS", 69))
 DNA_ALIGN_SORT_CPUS = int(config.get("DNA_ALIGN_SORT_CPUS", 16))
 DNA_PILEUP_CPUS = int(config.get("DNA_PILEUP_CPUS", DNA_ALIGN_CPUS))
-PILEUP_THREADS_PER_CELL = int(config.get("PILEUP_THREADS_PER_CELL", 1))
+PILEUP_BATCH_SIZE = int(config.get("PILEUP_BATCH_SIZE", 16))
+PILEUP_MAX_BATCH_BYTES = int(
+    config.get("PILEUP_MAX_BATCH_BYTES", 384 * 1024 * 1024)
+)
+PILEUP_THREADS_PER_BATCH = int(config.get("PILEUP_THREADS_PER_BATCH", 2))
 PILEUP_WINDOW_STEP = int(config.get("PILEUP_WINDOW_STEP", 1000000))
+CPG_VCF_THREADS_PER_BATCH = int(config.get("CPG_VCF_THREADS_PER_BATCH", 1))
 UNMATCHED_ALIGN_CPUS = int(config.get("UNMATCHED_ALIGN_CPUS", 69))
 UNMATCHED_SORT_CPUS = int(config.get("UNMATCHED_SORT_CPUS", 16))
 LAMBDA_ALIGN_CPUS = int(config.get("LAMBDA_ALIGN_CPUS", 48))
@@ -223,8 +236,10 @@ for setting, value in {
     "DNA_ALIGN_CPUS": DNA_ALIGN_CPUS,
     "DNA_ALIGN_SORT_CPUS": DNA_ALIGN_SORT_CPUS,
     "DNA_PILEUP_CPUS": DNA_PILEUP_CPUS,
-    "PILEUP_THREADS_PER_CELL": PILEUP_THREADS_PER_CELL,
+    "PILEUP_BATCH_SIZE": PILEUP_BATCH_SIZE,
+    "PILEUP_THREADS_PER_BATCH": PILEUP_THREADS_PER_BATCH,
     "PILEUP_WINDOW_STEP": PILEUP_WINDOW_STEP,
+    "CPG_VCF_THREADS_PER_BATCH": CPG_VCF_THREADS_PER_BATCH,
     "UNMATCHED_ALIGN_CPUS": UNMATCHED_ALIGN_CPUS,
     "UNMATCHED_SORT_CPUS": UNMATCHED_SORT_CPUS,
     "LAMBDA_ALIGN_CPUS": LAMBDA_ALIGN_CPUS,
@@ -234,6 +249,10 @@ for setting, value in {
 }.items():
     if value < 1:
         raise ValueError(f"{setting} must be positive.")
+if PILEUP_MAX_BATCH_BYTES < 0:
+    raise ValueError("PILEUP_MAX_BATCH_BYTES cannot be negative.")
+if PILEUP_BATCH_SIZE > 4096:
+    raise ValueError("PILEUP_BATCH_SIZE cannot exceed 4096 VCF samples.")
 if DNA_TRIM_OVERHEAD_CPUS >= DNA_TRIM_CPUS:
     raise ValueError("DNA_TRIM_OVERHEAD_CPUS must be smaller than DNA_TRIM_CPUS.")
 DNA_TRIM_WORKERS = min(
@@ -291,20 +310,36 @@ rule build_local_cb_splitter:
     shell:
         "flock {params.source_dir}/.build.lock make -C {params.source_dir} split_bam_by_cb_hts"
 
-rule build_local_mergecg_context:
+rule build_local_cpg_to_yame:
     input:
-        os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "mergecg_context.c"),
-        os.path.join(LOCAL_MERGECG_CONTEXT_DIR, "Makefile"),
+        os.path.join(LOCAL_CPG_TO_YAME_DIR, "cpg_to_yame.c"),
+        os.path.join(LOCAL_CPG_TO_YAME_DIR, "Makefile"),
     output:
-        LOCAL_MERGECG_CONTEXT,
+        LOCAL_CPG_TO_YAME,
     resources:
         mem = "4G",
         time = "00:15:00",
         cpus_per_task = 1,
     params:
-        source_dir = LOCAL_MERGECG_CONTEXT_DIR,
+        source_dir = LOCAL_CPG_TO_YAME_DIR,
     shell:
-        "flock {params.source_dir}/.build.lock make -C {params.source_dir} mergecg_context"
+        "flock {params.source_dir}/.build.lock make -C {params.source_dir} cpg_to_yame"
+
+rule build_cpg_coordinate_index:
+    input:
+        converter = CPG_TO_YAME,
+        reference = CPG_REFERENCE_BED,
+    output:
+        CPG_COORDINATE_INDEX,
+    resources:
+        mem = "1G",
+        time = "00:15:00",
+        cpus_per_task = 1,
+    params:
+        output_dir = os.path.dirname(CPG_COORDINATE_INDEX),
+    shell:
+        "mkdir -p {params.output_dir} && "
+        "{input.converter} index {input.reference} {output}"
 
 ## Lambda fastq outputs only exist for spatialdmt -- smcseq has no dedicated
 ## lambda barcode, so spatialmeth_trimtag.py doesn't write per-block Lambda
@@ -683,19 +718,21 @@ if PROTOCOL == "smcseq":
                 -printf '%f\\n' | sed 's/\\.bam$//' | sort > {output.align_txt}
             """
 
-# CpG methylation pileup: call methylation per barcode BAM, convert VCF to CpG BED,
-# merge strands, intersect with reference CpG BED, and pack into yame .cg format.
+# CpG methylation pileup: call deterministic size-balanced BAM batches and map
+# the VCF stream directly into sparse YAME format-3 records. Existing per-cell
+# VCFs remain usable as restart inputs, but new runs do not materialize them.
 rule dna_biscuit_pileup:
     input:
         align_txt = WORKDIR + "/{sample}/align_list.txt",
-        mergecg_context = MERGECG_CONTEXT,
+        cpg_converter = CPG_TO_YAME,
+        cpg_index = CPG_COORDINATE_INDEX,
+        batch_planner = PILEUP_BATCH_PLANNER,
+        batch_runner = PILEUP_BATCH_RUNNER,
     output:
         cg        = WORKDIR + "/{sample}/pileup/{sample}.cg",
         idx       = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
-        ## Sample-aggregate CA/CC/CG/CT retention extracted from the SAME
-        ## per-cell VCFs we generate for the .cg above -- no second pileup
-        ## anywhere. mqc_curated consumes this directly; it replaces
-        ## a separate feature_CH / Dinuc-bed intersection pass.
+        ## Sample-aggregate CA/CC/CG/CT retention extracted from the same
+        ## pileup stream as .cg -- no second pileup anywhere.
         conv_rate = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
     threads: DNA_PILEUP_CPUS
     resources:
@@ -704,149 +741,31 @@ rule dna_biscuit_pileup:
         cpus_per_task = threads,
     params:
         ref_fasta = os.path.join(REF_DIR, ref["REF_BASE"], ref["REF_FASTA"]),
-        cpg_bed   = os.path.join(REF_DIR, ref["REF_BASE"], ref["CPG_BED"]),
-        pileup_threads_per_cell = PILEUP_THREADS_PER_CELL,
+        pileup_batch_size = PILEUP_BATCH_SIZE,
+        pileup_max_batch_bytes = PILEUP_MAX_BATCH_BYTES,
+        pileup_threads_per_batch = PILEUP_THREADS_PER_BATCH,
         pileup_window_step = PILEUP_WINDOW_STEP,
+        cpg_vcf_threads_per_batch = CPG_VCF_THREADS_PER_BATCH,
     shell:
         """
         set -xeo pipefail
-        mkdir -p {WORKDIR}/{wildcards.sample}/pileup/ \
-                 {WORKDIR}/{wildcards.sample}/qc/biscuit_qc/
-        tmp_pileup={WORKDIR}/{wildcards.sample}/tmp/pileup/
-        mkdir -p $tmp_pileup
-        pileup_threads={params.pileup_threads_per_cell}
-        if (( pileup_threads > {resources.cpus_per_task} )); then
-            pileup_threads={resources.cpus_per_task}
-        fi
-        pileup_jobs=$(( {resources.cpus_per_task} / pileup_threads ))
-        if [[ $pileup_jobs -lt 1 ]]; then pileup_jobs=1; fi
+        {input.batch_runner} \
+            --cell-list {input.align_txt} \
+            --bam-dir {WORKDIR}/{wildcards.sample}/bam \
+            --tmp-dir {WORKDIR}/{wildcards.sample}/tmp/pileup \
+            --output-cg {output.cg} --output-index {output.idx} \
+            --output-conversion {output.conv_rate} \
+            --reference {params.ref_fasta} \
+            --cpg-converter {input.cpg_converter} \
+            --cpg-index {input.cpg_index} --yame {YAME} \
+            --planner {input.batch_planner} --python {PYTHON} \
+            --cpus {resources.cpus_per_task} \
+            --batch-size {params.pileup_batch_size} \
+            --max-batch-bytes {params.pileup_max_batch_bytes} \
+            --threads-per-batch {params.pileup_threads_per_batch} \
+            --cpg-threads {params.cpg_vcf_threads_per_batch} \
+            --window-step {params.pileup_window_step}
 
-        export tmp_pileup pileup_threads
-        find {WORKDIR}/{wildcards.sample}/bam/ -maxdepth 1 \
-            -name '[0-9][0-9][0-9][0-9].bam' -type f | sort | \
-            parallel --halt soon,fail=1 -j "$pileup_jobs" '
-                set -o pipefail
-                bam={{}}
-                barcode=$(basename "$bam" .bam)
-                out_vcf="$tmp_pileup/$barcode.vcf.gz"
-                if [[ -s "$out_vcf" && -s "$out_vcf.tbi" ]] && \
-                        tabix -l "$out_vcf" >/dev/null 2>&1; then
-                    exit 0
-                fi
-                tmp_vcf="$out_vcf.tmp.$$"
-                trap '"'"'rm -f "$tmp_vcf" "$tmp_vcf.tbi"'"'"' EXIT
-                biscuit pileup -m 0 -a 0 -c -u -p -@ "$pileup_threads" \
-                    -s {params.pileup_window_step} {params.ref_fasta} "$bam" \
-                    | bgzip -c > "$tmp_vcf"
-                tabix -p vcf "$tmp_vcf"
-                mv "$tmp_vcf" "$out_vcf"
-                mv "$tmp_vcf.tbi" "$out_vcf.tbi"
-                trap - EXIT
-            '
-
-        ## Per-cell processing: emit the cell's .cg AND its CA/CC/CG/CT
-        ## conversion summary (context\\tbeta_sum\\tbeta_cnt) in one parallel
-        ## pass. The .conv.tsv files stay on disk under tmp/pileup/ -- usable
-        ## by future per-cell spatial-conversion heatmaps without re-pileup.
-        expected_cpg_rows=$(zcat {params.cpg_bed} | wc -l)
-        export expected_cpg_rows
-        process_cell() {{
-            set -o pipefail
-            local vcf=$1 base out_dir cg_out conv_out cg_tmp conv_tmp actual_rows
-            local context_fifo conv_pid main_status conv_status
-            base=$(basename "$vcf" .vcf.gz)
-            out_dir=$(dirname "$vcf")
-            cg_out="$out_dir/$base.cg"
-            conv_out="$out_dir/$base.conv.tsv"
-            if [[ -s "$cg_out" && -e "$conv_out" ]]; then
-                actual_rows=$({YAME} info "$cg_out" | awk -F"\\t" 'NR == 2 {{ print $4 }}')
-                if [[ "$actual_rows" == "$expected_cpg_rows" ]]; then
-                    return 0
-                fi
-            fi
-            cg_tmp="$cg_out.tmp.$$"
-            conv_tmp="$conv_out.tmp.$$"
-            context_fifo="$out_dir/$base.context.fifo.$$"
-            rm -f "$context_fifo"
-            mkfifo "$context_fifo"
-            cleanup_cell() {{
-                if [[ -n ${{conv_pid:-}} ]]; then
-                    kill "$conv_pid" 2>/dev/null || true
-                fi
-                rm -f "$context_fifo" "$cg_tmp" "$conv_tmp"
-            }}
-            trap cleanup_cell EXIT
-
-            {{
-                awk -F"\\t" '
-                    {{ sum[$6] += $8; cnt[$6] += 1 }}
-                    END {{
-                        for (c in sum) printf "%s\\t%.6f\\t%d\\n", c, sum[c], cnt[c]
-                    }}' < "$context_fifo" | LC_ALL=C sort > "$conv_tmp"
-            }} &
-            conv_pid=$!
-
-            set +e
-            biscuit vcf2bed -e -t c "$vcf" | \
-                tee "$context_fifo" | \
-                awk -F"\\t" '$5 == "CG"' | \
-                LC_ALL=C sort -k1,1 -k2,2n | \
-                {input.mergecg_context} - | \
-                bedtools intersect -a {params.cpg_bed} -b - -sorted -loj | \
-                awk -v OFS="\\t" -F"\\t" -f {workflow.basedir}/../tools/wanding.awk \
-                    -e '{{ M=round($7*$8); print M,$8-M;}}' | \
-                {YAME} pack -f 3 - > "$cg_tmp"
-            main_status=$?
-            wait "$conv_pid"
-            conv_status=$?
-            conv_pid=
-            set -e
-            rm -f "$context_fifo"
-            if (( main_status != 0 || conv_status != 0 )); then
-                echo "Cell conversion failed for $base: CpG=$main_status conversion=$conv_status" >&2
-                rm -f "$cg_tmp" "$conv_tmp"
-                return 1
-            fi
-            actual_rows=$({YAME} info "$cg_tmp" | awk -F"\\t" 'NR == 2 {{ print $4 }}')
-            if [[ "$actual_rows" != "$expected_cpg_rows" ]]; then
-                echo "Invalid CpG dimensions for $base: $actual_rows != $expected_cpg_rows" >&2
-                rm -f "$cg_tmp" "$conv_tmp"
-                return 1
-            fi
-            mv "$cg_tmp" "$cg_out"
-            mv "$conv_tmp" "$conv_out"
-            trap - EXIT
-        }}
-        export -f process_cell
-        parallel --halt soon,fail=1 -j {resources.cpus_per_task} \
-            'process_cell {{}}' ::: $tmp_pileup/*.vcf.gz
-
-        cg_samples="$tmp_pileup/{wildcards.sample}.cg.samples"
-        : > {output.cg}
-        : > "$cg_samples"
-        for cg_file in "$tmp_pileup"/*.cg; do
-            barcode=$(basename "$cg_file" .cg)
-            cat "$cg_file" >> {output.cg}
-            printf '%s\n' "$barcode" >> "$cg_samples"
-        done
-        {YAME} index -s "$cg_samples" {output.cg}
-
-        ## Sample-level CA/CC/CG/CT = record-pooled mean across per-cell
-        ## conversion files (each cell contributed beta_sum + beta_cnt above;
-        ## pooling sums then dividing = each record weighted equally, which
-        ## is the same denominator the upstream QC.sh awk uses).
-        {{
-            echo "BISCUITqc Conversion Rate by Base Average Table"
-            echo -e "CA\\tCC\\tCG\\tCT"
-            cat $tmp_pileup/*.conv.tsv | awk -F"\\t" '
-                {{ sum[$1] += $2; cnt[$1] += $3 }}
-                END {{
-                    for (c in sum) m[c] = (cnt[c] >= 20) ? sum[c]/cnt[c] : -1
-                    printf "%g\\t%g\\t%g\\t%g\\n",
-                        (("CA" in m)?m["CA"]:-1), (("CC" in m)?m["CC"]:-1),
-                        (("CG" in m)?m["CG"]:-1), (("CT" in m)?m["CT"]:-1)
-                }}'
-        }} > {output.conv_rate}
         """
 
 # Lambda spike-in: alignment and pileup for bisulfite conversion efficiency estimation.

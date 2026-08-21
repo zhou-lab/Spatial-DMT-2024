@@ -1,10 +1,31 @@
 # DNA speed optimization: resume notes
 
 This file records work intentionally left after the 2026-08-20 closeout. The
-implemented and measured changes are summarized in `README.md`. Resume from
-branch `perf/dna-pipeline-speed-20260818` in
-`/home/suc3/Lab/Spatial-DMT-2024-speedopt`; do not modify or cancel an older
-production job merely to obtain benchmark capacity.
+implemented and measured changes are summarized in `README.md`. The pileup
+follow-up is on branch `perf/pileup-speed-20260820` in
+`/home/suc3/Lab/Spatial-DMT-2024-pileupopt`; it extends
+`perf/dna-pipeline-speed-20260818`. Do not modify or cancel an older production
+job merely to obtain benchmark capacity.
+
+## Completed pileup follow-up (2026-08-20)
+
+- Replaced per-cell dense CpG/reference intersections with an 87.5-MB shared
+  mmap coordinate index and direct BISCUIT-VCF to YAME format-3 conversion.
+  Deep conversion fell from 94 to 13.44 seconds; shallow conversion fell from
+  25.28 to 0.09 seconds. Real outputs are exact.
+- Added direct multi-sample VCF conversion and deterministic size-balanced
+  multi-BAM pileup. Defaults are 16 cells, a 384-MiB aggregate BAM target, two
+  BISCUIT threads per batch, and one converter thread.
+- Removed new intermediate VCFs. BISCUIT streams into a staging directory;
+  outputs publish only after `pipefail`, dimension, and sample-set checks pass.
+  Valid legacy VCFs are still consumed on restart.
+- Fixed two-core direct batches reduced wall/CPU by 38%/37% for four 40-MB
+  cells and 21%/22% for four 80-MB cells. A 1.03-GB joint batch was beyond the
+  useful range after its 95-second conversion, which is why byte limiting is
+  required.
+- Completed native synthetic tests, exact 16-sample and deep-cell regressions,
+  a real four-cell Snakemake run, a 1.22-second restart, legacy-VCF recovery,
+  and injected upstream-failure validation. See `pileup_20260820.tsv`.
 
 ## Highest-value next experiments
 
@@ -28,22 +49,31 @@ production job merely to obtain benchmark capacity.
    and the revised pileup implementation. Retain per-rule Slurm accounting.
    This is required before replacing the production branch.
 
-3. **Distribute per-cell pileup across two nodes.** Refactor the monolithic
-   pileup rule into a checkpoint plus moderate batches (roughly 10-25 cells per
-   Slurm job), not 2,500 one-cell scheduler jobs. With matched/unmatched
-   alignment complete, the current 144-CPU QOS could run about 138 one-thread
-   cells across two nodes instead of 69 on one node. Preserve atomic VCF/CG
-   outputs, restartability, deterministic cell order, one final `yame index -s`,
-   and the exact deep-cell regression.
+3. **Scatter planned pileup batches across two Slurm allocations.** The new
+   runner creates restart-safe content-keyed manifests but still executes them
+   inside one monolithic Snakemake rule/allocation. Refactor manifest planning
+   into a checkpoint and submit moderate batch groups, not 2,500 cell jobs.
+   Under a free 144-CPU QOS, two 69-CPU allocations can consume all planned
+   batches. Preserve staged outputs, deterministic final cell order, and one
+   aggregate `yame index -s`.
 
-4. **Remove repeated reference-CpG scans during cell conversion.** Each cell
-   still coordinate-sorts calls and asks bedtools to scan the full CpG BED.
-   Extend the context helper or add a batch converter that loads/reference-maps
-   CpG coordinates once and processes several cell streams. Benchmark a mix of
-   sparse and dense 23DM cells, and require byte-identical `.cg` output. This is
-   likely the strongest remaining algorithmic pileup opportunity.
+4. **Replace the full-sample pileup model with production accounting.** Run all
+   2,500 cells for shallow 10D and one 23DM-class sample at 48 or 69 CPUs. Record
+   per-batch GNU Parallel timing, Slurm CPU/RSS, filesystem throughput, restart
+   time, and exact aggregate outputs. The current model projects historical
+   23DM from 3:37 at 48 CPUs to about 32 minutes at 48 or 23 minutes at 69;
+   shared NFS load is not represented. Re-test 256/384/512-MiB byte targets if
+   the model misses materially.
 
-5. **Benchmark BAM compression end to end, not at sort alone.** Compression
+5. **Reduce multi-sample VCF parsing overhead.** A compressed 16-sample VCF
+   converts in 9.39 seconds, while a 998-MB four-deep-cell VCF takes 95 seconds.
+   Profile field splitting and per-sample `CV`/`BT` extraction. Promising work
+   includes parsing the fixed BISCUIT FORMAT layout without repeated scans,
+   flushing completed chromosomes incrementally, and adding a compact BISCUIT
+   output mode or callback that bypasses VCF text entirely. Every path must
+   remain exact on C/G strand rounding and conversion summaries.
+
+6. **Benchmark BAM compression end to end, not at sort alone.** Compression
    levels 1/3 cut standalone sort time by 50%/39% but enlarge BAMs by 28.5%/
    17.3%; they were not adopted because sort is a tiny tail and larger BAMs can
    slow split, flagstat, and pileup on shared storage. Time all downstream
@@ -51,7 +81,7 @@ production job merely to obtain benchmark capacity.
    time improves under representative NFS load; moderate extra storage is
    acceptable, but another storage exhaustion is not.
 
-6. **Validate the time-first trim defaults at full concurrency.** The adopted
+7. **Validate the time-first trim defaults at full concurrency.** The adopted
    512-MiB blocks and gzip level 1 are exact and fastest in the final
    two-worker deep-concurrency fixture. Run at 65 workers on at least a 50M-pair
    real stream, capture aggregate Slurm RSS, and confirm the 160-GiB request has
@@ -84,8 +114,10 @@ production job merely to obtain benchmark capacity.
 
 - Run the integrated pileup equivalence on hg38 as well as mm10 and on cells
   containing unusual contigs and zero CpG calls.
-- Add an injected upstream BISCUIT failure test for the direct bgzip pipeline;
-  per-worker `pipefail` is present, but the failure path should be exercised.
+- Add an automated runner fixture around the already validated injected
+  BISCUIT failure and legacy-VCF recovery paths. Failed staging directories are
+  deliberately retained for diagnosis; add a scoped cleanup command only
+  after proving it cannot touch current manifests or completed cell outputs.
 - Install compatible ASan/UBSan runtime libraries or use a container/compiler
   with matching runtimes. Valgrind passed; sanitizer binaries could not run on
   the current host because the required runtime libraries were absent.
@@ -100,10 +132,12 @@ production job merely to obtain benchmark capacity.
 
 ## Resume checklist
 
-1. Read `benchmarks/dna_speed/README.md` and inspect the branch diff/commit.
+1. Read `benchmarks/dna_speed/README.md`, `pileup_20260820.tsv`, and inspect the
+   branch diff/commit.
 2. Check live production jobs, QOS CPU/memory limits, node CPU counts, and free
    scratch space.
-3. Rebuild all three native helpers and rerun native failure tests.
+3. Rebuild all native helpers, run `make test` in `tools/cpg_to_yame`, run the
+   planner unit test, and rerun native failure tests.
 4. Use fixed inputs and change one variable per benchmark.
 5. Require exact outputs where the tool contract is deterministic. Across
    BISCUIT thread counts, compare primary/aggregate metrics because secondary

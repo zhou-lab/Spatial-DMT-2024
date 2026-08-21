@@ -1,0 +1,27 @@
+case	input	threads_or_cpus	wall_s	cpu_s	max_rss_kb	output_bytes	exactness	notes
+cpg_index_mm10	21867837_CpGs	1	4.23		91000	87473356	rows_exact	one_shared_mmap_index
+convert_shallow_0101_legacy	one_cell_VCF	1	25.28				baseline	context_BED_dense_reference_path
+convert_shallow_0101_direct	one_cell_VCF	1	0.09				raw_and_YAME_exact	281x_conversion_speedup
+convert_deep_0501_context	one_cell_VCF	1	94.00				raw_and_YAME_exact	prior_optimized_context_path
+convert_deep_0501_direct	one_cell_VCF	1	13.44				raw_and_YAME_exact	7.0x_conversion_speedup
+deep_0501_vcf_level1	214824132_BAM_bytes	4	34.15	113.16	286000	197209275	CpG_exact	bgzip_level1
+deep_0501_vcf_default	214824132_BAM_bytes	4	38.12	131.03	291000	145301072	CpG_exact	default_bgzip
+shallow_4_independent	4_largest_10D_cells	4	35.94	101.27			all_cells_exact	four_one_thread_processes
+shallow_4_joint	4_largest_10D_cells	4	13.98	32.95		14037967	all_cells_exact	one_four_thread_joint_VCF
+shallow_8_joint	8_largest_10D_cells	4	16.94	43.38	116700	28494242	all_cells_exact	joint_VCF
+shallow_16_joint_t4	16_largest_10D_cells	4	21.54	67.76	165400	64292920	all_cells_exact	joint_VCF
+shallow_16_joint_t2	16_largest_10D_cells	2	35.91	67.85	88100	64292920	all_cells_exact	joint_VCF
+shallow_32_joint	32_largest_10D_cells	4	38.53	128.12	367000	148252550	all_cells_exact	joint_VCF
+shallow_16_batch_converter	64292920_VCF_bytes	1	9.39	9.08	96012		all_16_cells_exact	compressed_joint_VCF_to_YAME
+shallow_16_direct_stream	40576203_BAM_bytes	2	44.09	70.99	89444	0	all_16_cells_exact	fixed_two_core_cpuset_no_VCF
+deep_4_independent_generation	1030686816_BAM_bytes	2	263.54	522.19	234640	938928520	CpG_exact	two_concurrent_one_thread_cells
+deep_4_joint_generation	1030686816_BAM_bytes	2	220.05	496.16	929888	997801672	CpG_exact	joint_VCF_too_large_after_conversion
+deep_4_joint_converter	997801672_VCF_bytes	1	95.48	93.74	87036		all_4_cells_exact	conversion_values_exact_row_order_canonicalized
+deep_4x40_independent_stream	160115133_BAM_bytes	2	90.77	163.56	47524	0	all_4_cells_exact	fixed_two_core_cpuset
+deep_4x40_joint_stream	160115133_BAM_bytes	2	56.18	102.79	200912	0	all_4_cells_exact	38.1pct_wall_reduction
+deep_4x80_independent_stream	320037770_BAM_bytes	2	122.84	228.55	76712	0	all_4_cells_exact	fixed_two_core_cpuset
+deep_4x80_joint_stream	320037770_BAM_bytes	2	96.49	178.99	339224	0	all_4_cells_exact	21.4pct_wall_reduction
+runner_real_4_cell_first	1981143_BAM_bytes	4	23.51	28.01	50576	0	aggregate_exact	full_runner_and_YAME_index
+runner_real_4_cell_restart	1981143_BAM_bytes	4	1.22	0.69	50576	0	aggregate_exact	no_BISCUIT_invocation
+historical_10D_full	2500_cells	20	8460				production_output	job_18125264
+historical_23DM_full	2500_cells	48	13043		17235408	about_124GB	production_output	job_17122224
