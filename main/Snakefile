@@ -225,6 +225,7 @@ PILEUP_WINDOW_STEP = int(config.get("PILEUP_WINDOW_STEP", 1000000))
 CPG_VCF_THREADS_PER_BATCH = int(config.get("CPG_VCF_THREADS_PER_BATCH", 1))
 UNMATCHED_ALIGN_CPUS = int(config.get("UNMATCHED_ALIGN_CPUS", 69))
 UNMATCHED_SORT_CPUS = int(config.get("UNMATCHED_SORT_CPUS", 16))
+UNMATCHED_DIAGNOSTICS_CPUS = int(config.get("UNMATCHED_DIAGNOSTICS_CPUS", 24))
 LAMBDA_ALIGN_CPUS = int(config.get("LAMBDA_ALIGN_CPUS", 48))
 LAMBDA_ALIGN_SORT_CPUS = int(config.get("LAMBDA_ALIGN_SORT_CPUS", 24))
 DNA_SPLIT_JOBS = min(int(config.get("DNA_SPLIT_JOBS", DNA_ALIGN_CPUS)), DNA_ALIGN_CPUS)
@@ -242,6 +243,7 @@ for setting, value in {
     "CPG_VCF_THREADS_PER_BATCH": CPG_VCF_THREADS_PER_BATCH,
     "UNMATCHED_ALIGN_CPUS": UNMATCHED_ALIGN_CPUS,
     "UNMATCHED_SORT_CPUS": UNMATCHED_SORT_CPUS,
+    "UNMATCHED_DIAGNOSTICS_CPUS": UNMATCHED_DIAGNOSTICS_CPUS,
     "LAMBDA_ALIGN_CPUS": LAMBDA_ALIGN_CPUS,
     "LAMBDA_ALIGN_SORT_CPUS": LAMBDA_ALIGN_SORT_CPUS,
     "DNA_SPLIT_JOBS": DNA_SPLIT_JOBS,
@@ -1235,7 +1237,7 @@ rule mqc_unmatched_diagnostics:
     output:
         tsv         = WORKDIR + "/{sample}/qc/unmatched_diagnostics.tsv",
         mqc_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
-    threads: 24
+    threads: UNMATCHED_DIAGNOSTICS_CPUS
     resources:
         mem = "8G",
         time = config.get("UNMATCHED_DIAGNOSTICS_TIME", "12:00:00"),
