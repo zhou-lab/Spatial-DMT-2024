@@ -7,46 +7,14 @@ Reads:
   - {sample}_trim_stats.txt      (key-value: Reads_total, Reads_passed, WL_unmatched, ...)
   - {sample}_spatial_barcode_counts.tsv (legacy fallback for the designed count)
   - {sample}_chromhmm_summary.tsv (yame summary output)
-  - optional lambda BAM flagstat; if supplied, genomic read pairs are
-    Reads_total minus lambda pairs with both mates mapped.
+  - optional lambda BAM flagstat for the conversion-control metric elsewhere
+    in the report; it does not alter the raw read-pair denominator.
 
 Writes:
   - {output_dir}/{sample}_stats_mqc.tsv  (MultiQC generalstats)
 """
 import argparse
 import os
-import re
-
-
-def lambda_both_mapped_pairs(flagstat_path):
-    """Return lambda read pairs where both mates mapped from samtools flagstat."""
-    if not flagstat_path:
-        return None
-    try:
-        with open(flagstat_path) as handle:
-            for line in handle:
-                m = re.match(r'^(\d+)\s+\+\s+\d+\s+with itself and mate mapped$', line.rstrip())
-                if m:
-                    return int(m.group(1)) // 2
-    except FileNotFoundError:
-        return None
-    return None
-
-
-def genomic_total(stats, lambda_flagstat=None):
-    """DNA read pairs excluding the barcode85/lambda bucket."""
-    n_total = stats.get('Reads_total')
-    lambda_pairs = lambda_both_mapped_pairs(lambda_flagstat)
-    if n_total is not None and lambda_pairs is not None:
-        return max(0, n_total - lambda_pairs)
-    if stats.get('Reads_detected') is not None:
-        return stats['Reads_detected']
-    if n_total is None:
-        return None
-    for key in ('Reads_barcode85', 'Reads_written_barcode85'):
-        if stats.get(key) is not None:
-            return n_total - stats[key]
-    return n_total
 
 
 def main():
@@ -55,7 +23,7 @@ def main():
     p.add_argument('--spatial-counts',   required=True)
     p.add_argument('--chromhmm-summary', required=True)
     p.add_argument('--lambda-flagstat',
-                   help='samtools flagstat for lambda BAM; uses pairs with both mates mapped as temporary control subtraction')
+                   help='accepted for command-line compatibility; does not alter the raw read denominator')
     p.add_argument('--sample',           required=True)
     p.add_argument('--output-dir',       required=True)
     args = p.parse_args()
@@ -81,13 +49,19 @@ def main():
                 except ValueError:
                     pass
 
-    n_total = genomic_total(stats, args.lambda_flagstat)
+    # Linker yield is defined against the raw trim denominator. Do not
+    # substitute a lambda-alignment-derived genomic denominator here.
+    n_total = stats.get('Reads_total')
     n_assigned = stats.get('Reads_passed')
     # Reads_passed is the pre-alignment whitelist-assigned count. Spatial
     # counts may be post-bsconv and therefore must not define barcode yield.
     n_designed = n_assigned if n_assigned is not None else n_designed_from_spatial
-    n_wl_miss = stats.get('WL_unmatched', stats.get('Unmatched_WM', 0))
-    n_linkers = None if n_assigned is None else n_assigned + n_wl_miss
+    n_structure_fail = stats.get('Unmatched_SF')
+    n_linkers = (
+        None
+        if n_total is None or n_structure_fail is None
+        else max(0, n_total - n_structure_fail)
+    )
 
     # Read bulk ChromHMM methylation levels from summary file
     chromhmm = {}
@@ -125,7 +99,7 @@ def main():
         f.write('# section_name: "Spatial Methyl QC Stats"\n')
         f.write('# plot_type: "generalstats"\n')
         f.write('# pconfig:\n')
-        f.write('#    - total read pairs:       {title: "Genomic Read Pairs",     format: "{:,.0f}"}\n')
+        f.write('#    - total read pairs:       {title: "Raw Read Pairs",         format: "{:,.0f}"}\n')
         f.write('#    - both linkers:           {title: "Both Linkers",           format: "{:,.0f}"}\n')
         f.write('#    - with designed barcodes: {title: "Designed Barcodes",      format: "{:,.0f}"}\n')
         f.write('#    - both linkers / total:   {title: "Linkers / Total (%)",    min: 0, max: 100, suffix: "%"}\n')

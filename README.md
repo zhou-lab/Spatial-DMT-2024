@@ -335,11 +335,19 @@ final_output/{sample}/
   {sample}.cg              # genomic CpG methylation matrix
   {sample}.cg.idx          # yame index for {sample}.cg
   {sample}_Lambda.cg       # lambda spike-in CpG methylation matrix
+  pipeline_version.tsv     # release, protocol, reference, and assignment label
   qc_report.html           # self-contained QC report
   multiqc_report.html      # MultiQC report
   multiqc_report_data/     # MultiQC parsed data and assets
   Solo.out/                # STARsolo count matrices (raw/ and filtered/), RNA samples only
 ```
+
+The repository-level `VERSION` file is the canonical pipeline release label.
+Every `final_output/{sample}/pipeline_version.tsv` records that label together
+with the sample, protocol, and reference. Files created by Snakemake use the
+`workflow_generated` assignment; compatible historical outputs may be labeled
+`backfilled_compatible` after their workflow and output schema are audited.
+Release tags and `VERSION` must match, and a released tag must not be moved.
 
 ### 2. Quality control
 

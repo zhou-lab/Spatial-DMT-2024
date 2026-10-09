@@ -1,0 +1,34 @@
+pipeline	label	metric	value	unit	display
+spmetsle14d	14D, revised	Raw read pairs	26532884	read pairs	26.53M
+spmetsle14d	14D, revised	Designed	19924129	fragments	19.92M
+spmetsle14d	14D, revised	Designed / raw	75.09	percent	75.09%
+spmetsle14d	14D, revised	Mapped before CpH filter	18592510	fragments	18.59M
+spmetsle14d	14D, revised	Mapping rate	93.32	percent	93.32%
+spmetsle14d	14D, revised	CpH-filter passed		fragments	—
+spmetsle14d	14D, revised	CpH-filter passed / mapped		percent	—
+spmetsle14d	14D, revised	Duplication	6.27	percent	6.27%
+spmetsle14d	14D, revised	CpG methylation	0.686418	fraction	0.686
+spmetsle14d	14D, revised	CpH (A/T/G)	0.008281	fraction	0.84% / 0.77% / 0.87%
+spmetsle14d	14D, revised	Lambda retention	0.036	fraction	0.036
+e65_bsconv	E6.5, ours	Raw read pairs	333280000	read pairs	333.28M
+e65_bsconv	E6.5, ours	Designed	241020000	fragments	241.02M
+e65_bsconv	E6.5, ours	Designed / raw	72.32	percent	72.32%
+e65_bsconv	E6.5, ours	Mapped before CpH filter	158760000	fragments	158.76M
+e65_bsconv	E6.5, ours	Mapping rate	65.9	percent	65.9%
+e65_bsconv	E6.5, ours	CpH-filter passed	103900000	fragments	103.90M
+e65_bsconv	E6.5, ours	CpH-filter passed / mapped	65.4	percent	65.4%
+e65_bsconv	E6.5, ours	Duplication	18.1	percent	18.1%
+e65_bsconv	E6.5, ours	CpG methylation	0.565	fraction	0.565
+e65_bsconv	E6.5, ours	CpH (A/T/G)	0.00649	fraction	1.81% / 0.068% / 0.069%
+e65_bsconv	E6.5, ours	Lambda retention	0.965	fraction	0.965
+e65_reproduced	E6.5, reproduced	Raw read pairs	333280000	read pairs	333.28M
+e65_reproduced	E6.5, reproduced	Designed	253380000	selected-mate reads	253.38M
+e65_reproduced	E6.5, reproduced	Designed / raw	76.03	percent	76.03%
+e65_reproduced	E6.5, reproduced	Mapped before CpH filter	52050000	selected-mate reads	52.05M
+e65_reproduced	E6.5, reproduced	Mapping rate	20.54	percent	20.54%
+e65_reproduced	E6.5, reproduced	CpH-filter passed	48110000	selected-mate reads	48.11M
+e65_reproduced	E6.5, reproduced	CpH-filter passed / mapped	92.43	percent	92.43%
+e65_reproduced	E6.5, reproduced	Duplication		percent	—
+e65_reproduced	E6.5, reproduced	CpG methylation	0.657	fraction	0.657
+e65_reproduced	E6.5, reproduced	CpH (A/T/G)	0.0173	fraction	1.73%
+e65_reproduced	E6.5, reproduced	Lambda retention		fraction	—

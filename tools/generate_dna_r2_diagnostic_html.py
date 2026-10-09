@@ -293,19 +293,10 @@ def row(label, requirement, value, frac_failure, frac_total, description, class_
     )
 
 
-def genomic_total(trim):
-    """DNA read pairs excluding the barcode85/lambda bucket."""
-    if trim.get("Reads_detected") is not None:
-        return trim["Reads_detected"]
-    total = trim.get("Reads_total", 0)
-    for key in ("Reads_barcode85", "Reads_written_barcode85"):
-        if trim.get(key) is not None:
-            return total - trim[key]
-    return total
-
-
 def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
-    total = genomic_total(trim)
+    # SF/WM counters are generated before lambda/control routing, so use the
+    # raw trim denominator to make the failure rows an exact partition.
+    total = trim.get("Reads_total", 0)
     wl_unmatched = trim.get("WL_unmatched", 0)
     sf_reads = trim.get(
         "Unmatched_SF",
@@ -321,18 +312,25 @@ def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
             unmatched.get(("align_stats", "wl_miss_n_reads"), 0),
         ),
     )
+    passed_reads = trim.get("Reads_passed", 0)
 
     sf_linker1 = unmatched.get(("sf_anchor_fail", "linker1_fail_n"), 0)
     sf_linker2 = unmatched.get(("sf_anchor_fail", "linker2_fail_n"), 0)
     sf_tn5 = unmatched.get(("sf_anchor_fail", "tn5_me_fail_n"), 0)
     sf_all_three_absent = unmatched.get(("sf_anchor_overlap", "all_three_absent_n"), 0)
     wm_count = wl_unmatched or wm_reads
-    failure_reads = sf_reads + wm_count
+    post_parse_filter_reads = total - passed_reads - sf_reads - wm_count
+    if post_parse_filter_reads < 0:
+        raise ValueError(
+            "Trim counters exceed Reads_total; SF/WM diagnostics and trim stats "
+            "come from different read sets"
+        )
+    failure_reads = sf_reads + wm_count + post_parse_filter_reads
 
     miss_rows = "\n".join([
         row("Total read pairs", "", total, "—", "100.0%",
-            "Genomic DNA read pairs entering trim/tag, excluding the barcode85/lambda bucket.", "summary-row"),
-        row("Total missed pairs", "Structure failures plus barcode whitelist misses", failure_reads,
+            "All raw DNA read pairs entering trim/tag, including reads later routed to the lambda/barcode-85 control.", "summary-row"),
+        row("Total missed pairs", "All pairs not emitted on the matched track", failure_reads,
             "100.0%", pct(failure_reads, total),
             "All DNA read pairs that did not enter a designed spatial barcode.", "summary-row"),
         row("SF pairs", "Any structural stage failed", sf_reads, pct(sf_reads, failure_reads), pct(sf_reads, total),
@@ -353,6 +351,10 @@ def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
         row("WM: barcode whitelist miss", "All structure stages passed", wm_count,
             pct(wm_count, failure_reads), pct(wm_count, total),
             miss_description("wm", wm_count, total)),
+        row("Post-parse/read-length drop", "Structure parsed, then barcode or minimum-length filter failed",
+            post_parse_filter_reads, pct(post_parse_filter_reads, failure_reads),
+            pct(post_parse_filter_reads, total),
+            "Residual input pairs not present in the passed, structure-fail, or whitelist-miss counters. This captures the unlabeled barcode-length and minimum-read-length exits in older trim-stat files."),
     ])
 
     rna_html = ""
@@ -475,8 +477,8 @@ def build_sections(sample, trim, unmatched, rna=None, protocol="spatialdmt"):
       <thead><tr>
         <th>Failure class</th>
         <th title="Read-pair count for this miss class.">Count</th>
-        <th title="Fraction of all DNA failures: structure failures plus barcode whitelist misses.">Fraction of total failures</th>
-        <th title="Fraction of genomic DNA read pairs entering trim/tag, excluding the barcode85/lambda bucket.">Fraction of total</th>
+        <th title="Fraction of all DNA failures: structure failures, whitelist misses, and post-parse/read-length drops.">Fraction of total failures</th>
+        <th title="Fraction of all raw DNA read pairs entering trim/tag.">Fraction of total</th>
       </tr></thead>
       <tbody>
         {miss_rows}

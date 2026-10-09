@@ -5,4 +5,22 @@ dev/
 logs
 .codex
 TODO.md
-PROGRESS.md
+
+# Local agent and project memory
+/AGENTS.md
+/PROGRESS.md
+/LESSONS.md
+/docs/lessons/
+
+# Generated analyses and reports
+/results/
+/analysis/cpg_occupancy/*
+!/analysis/cpg_occupancy/README.md
+/*_spatial_cpg_methylation.png
+/*_spatial_cpg_methylation.tsv
+/multiqc_*.html
+/multiqc_*_data/
+
+# Local manuscript and experimental workflow drafts
+/MANUSCRIPT_OUTLINE*.md
+/main/Snakefile.spatialdmt_bsconv_y005

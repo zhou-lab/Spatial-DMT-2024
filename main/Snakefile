@@ -50,6 +50,13 @@ def require_config(key):
 REF_DIR      = require_config("REF_DIR")
 PYTHON       = require_config("PYTHON")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
+VERSION_FILE = os.path.join(workflow.basedir, "..", "VERSION")
+VERSION_WRITER = os.path.join(
+    workflow.basedir,
+    "..",
+    "tools",
+    "write_pipeline_version.py",
+)
 
 ## R2 chemistry: spatialdmt (50x50, 8+8bp barcodes — default)
 ##           or smcseq (96x96, 11+11bp + GGTGTAGTGGGTTTGGAGG primer)
@@ -145,7 +152,28 @@ rule final_output:
         expand(OUTDIR + "/{sample}/qc_report.html", sample=SAMPLES),
         expand(OUTDIR + "/{sample}/multiqc_report.html", sample=SAMPLES),
         expand(OUTDIR + "/{sample}/multiqc_report_data", sample=SAMPLES),
+        expand(OUTDIR + "/{sample}/pipeline_version.tsv", sample=SAMPLES),
         expand(OUTDIR + "/{sample}/Solo.out", sample=RNA_SAMPLES),
+
+rule pipeline_version:
+    input:
+        version = VERSION_FILE,
+        writer = VERSION_WRITER,
+    output:
+        WORKDIR + "/{sample}/qc/pipeline_version.tsv",
+    resources:
+        mem = "1G",
+        time = "00:05:00",
+        cpus_per_task = 1,
+    shell:
+        """
+        {PYTHON} {input.writer} \
+            --sample {wildcards.sample} \
+            --version-file {input.version} \
+            --protocol {PROTOCOL} \
+            --reference {GENOME} \
+            --output {output}
+        """
 
 ################################################################################
 # DNA Pipeline Rules
@@ -1486,6 +1514,7 @@ rule copy_final_sample_outputs:
         qc      = WORKDIR + "/{sample}/qc/html/qc_report.html",
         multiqc = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
         multiqc_data = WORKDIR + "/{sample}/qc/html/multiqc_report_data",
+        version = WORKDIR + "/{sample}/qc/pipeline_version.tsv",
     output:
         cg      = OUTDIR + "/{sample}/{sample}.cg",
         cg_idx  = OUTDIR + "/{sample}/{sample}.cg.idx",
@@ -1493,6 +1522,7 @@ rule copy_final_sample_outputs:
         qc      = OUTDIR + "/{sample}/qc_report.html",
         multiqc = OUTDIR + "/{sample}/multiqc_report.html",
         multiqc_data = directory(OUTDIR + "/{sample}/multiqc_report_data"),
+        version = OUTDIR + "/{sample}/pipeline_version.tsv",
     shell:
         """
         mkdir -p {OUTDIR}/{wildcards.sample}
@@ -1501,6 +1531,7 @@ rule copy_final_sample_outputs:
         cp {input.lambda_cg} {output.lambda_cg}
         cp {input.qc} {output.qc}
         cp {input.multiqc} {output.multiqc}
+        cp {input.version} {output.version}
         rm -rf {output.multiqc_data}
         cp -r {input.multiqc_data} {output.multiqc_data}
         """
