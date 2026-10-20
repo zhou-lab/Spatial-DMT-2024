@@ -2,6 +2,7 @@ executor: cluster-generic
 cluster-generic-submit-cmd:
   "mkdir -p logs/{rule} &&
     sbatch
+    --export=ALL
     --time={resources.time}
     --mem={resources.mem_mb}
     --cpus-per-task={resources.cpus_per_task}

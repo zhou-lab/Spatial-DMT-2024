@@ -4,7 +4,7 @@ set -eo pipefail
 
 root=$(cd "$(dirname "$0")" && pwd)
 tool=${CPG_TO_YAME:-$root/cpg_to_yame}
-yame=${YAME:-/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/yame}
+yame=${YAME:-yame}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/cpg_to_yame.test.XXXXXX")
 tool_command=("$tool")
 if [[ ${VALGRIND:-0} == 1 ]]; then

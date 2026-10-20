@@ -17,5 +17,5 @@ Local changes are intentionally limited to:
   paired-template errors return through HTSlib cleanup so every previously
   completed record is flushed before the nonzero exit.
 
-Build with `make`. Override `HTSLIB_ROOT` when the shared lab HTSlib 1.17 build
-is not available.
+Build with `make`. HTSlib is discovered with `pkg-config`; override
+`HTSLIB_CFLAGS` and `HTSLIB_LIBS` for a nonstandard HTSlib installation.

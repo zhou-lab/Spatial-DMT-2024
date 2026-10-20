@@ -4,13 +4,14 @@
 The eight-base ACGT tag is decoded to the pipeline's `XXYY` filename. Missing
 and invalid tags are written to `UNTAGGED.bam` and `MALFORMED.bam`.
 
-Build against the lab HTSlib installation:
+Build against HTSlib in the active environment:
 
 ```bash
 make
 ```
 
-Override `HTSLIB_ROOT` for another static HTSlib build. Direct mode opens one
+HTSlib is discovered with `pkg-config`; override `HTSLIB_CFLAGS` and
+`HTSLIB_LIBS` for a nonstandard installation. Direct mode opens one
 output per observed cell and is intended for compatibility/testing:
 
 ```bash

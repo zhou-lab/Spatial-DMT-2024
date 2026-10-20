@@ -14,64 +14,49 @@ To access the processed `.cg` files: https://huggingface.co/datasets/HBBWS/Spati
 ## Pipeline instructions
 ### Dependencies
 
-All dependencies can be installed via [conda](https://docs.conda.io/en/latest/) (bioconda/conda-forge channels) except BBTools, which is available via [Homebrew](https://brew.sh/) on macOS or direct download on Linux.
+Create the tested environment from the checked-in specification. Micromamba,
+Mamba, and Conda all accept this file; Micromamba is shown because it does not
+require a base Conda installation.
 
-**Install via conda:**
 ```bash
-conda install -c conda-forge -c bioconda \
-    snakemake=9.19.0 \
-    star=2.7.11b \
-    biscuit=1.8 \
-    samtools=1.22.1 \
-    htslib=1.22.1 \
-    bedtools=2.31.1 \
-    dupsifter=1.3.0 \
-    yame=1.9 \
-    pigz=2.8 \
-    parallel=20260422 \
-    multiqc \
-    r-base \
-    r-seurat \
-    biopython \
-    fuzzysearch \
-    regex \
-    pysam \
-    matplotlib \
-    pandas
+micromamba create -f environment.yml
+micromamba activate spatial-dmt
+export PYTHONNOUSERSITE=1
 ```
 
-**For SLURM execution only**, install the cluster-generic executor plugin into your Snakemake environment (not required for local/HPC runs):
-```bash
-pip install snakemake-executor-plugin-cluster-generic
-```
+The environment includes BBTools (`bbduk.sh`), the Slurm executor plugin, a C
+compiler, and HTSlib development metadata. The workflow builds its modified
+vendored dupsifter, BAM splitter, and CpG converter automatically against the
+HTSlib in the active environment. Do not install the Bioconda `dupsifter`
+package; its current dependency constraints conflict with BISCUIT 1.8 and the
+pipeline does not use it.
 
-**Install BBTools (provides `bbduk.sh`) separately:**
-```bash
-# macOS (Homebrew)
-brew install bbtools   # tested: 39.81b
+`PYTHONNOUSERSITE=1` prevents packages in `~/.local` from silently overriding
+the versions in the release environment. The Snakefile also exports this for
+all rule subprocesses, but it should be set before launching Snakemake so the
+controller itself is isolated.
 
-# Linux
-# Download from https://jgi.doe.gov/data-and-tools/software-tools/bbtools/
-```
+The checked-in Slurm profile submits rule jobs with `--export=ALL`. This is
+required when a controller was itself submitted with a restrictive Slurm
+export policy; without it, compute nodes can lose the active environment's
+`PATH` and fail to locate specialized tools such as YAME.
 
 | Tool | Version tested | Source |
 |------|---------------|--------|
 | [Snakemake](https://snakemake.readthedocs.io/) | 9.19.0 | conda-forge |
-| [snakemake-executor-plugin-cluster-generic](https://github.com/snakemake/snakemake-executor-plugin-cluster-generic) | 1.0.9 | pip (SLURM only) |
+| [snakemake-executor-plugin-cluster-generic](https://github.com/snakemake/snakemake-executor-plugin-cluster-generic) | 1.0.9 | bioconda (SLURM only) |
 | [STAR](https://github.com/alexdobin/STAR) / STARsolo | 2.7.11b | bioconda |
 | [BISCUIT](https://huishenlab.github.io/biscuit/) | 1.8 (minimum) | bioconda |
-| [samtools](https://www.htslib.org/) | 1.22.1 | bioconda |
-| bgzip / tabix (htslib) | 1.22.1 | bioconda |
+| [samtools](https://www.htslib.org/) | 1.23.1 | bioconda |
+| bgzip / tabix (htslib) | 1.23.1 | bioconda |
 | [bedtools](https://bedtools.readthedocs.io/) | 2.31.1 | bioconda |
 | [dupsifter](https://github.com/huishenlab/dupsifter) | 1.3.x-derived vendored build | built by the workflow against HTSlib |
-| [yame](https://github.com/zhou-lab/yame) | 1.9 | bioconda |
+| [yame](https://github.com/zhou-lab/yame) | 1.10 | bioconda |
 | [pigz](https://zlib.net/pigz/) | 2.8 | conda-forge |
 | [GNU parallel](https://www.gnu.org/software/parallel/) | 20260422 | conda-forge |
-| [BBTools](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/) (bbduk) | 39.81b | Homebrew / direct |
-| [MultiQC](https://multiqc.info/) | 1.34 | conda-forge |
-| [R](https://www.r-project.org/) | 4.x | conda-forge |
-| [Seurat](https://satijalab.org/seurat/) | 5.x | conda-forge |
-| [Python](https://www.python.org/) | 3.x | conda-forge |
+| [BBTools](https://jgi.doe.gov/data-and-tools/software-tools/bbtools/) (bbduk) | 39.81 | bioconda |
+| [MultiQC](https://multiqc.info/) | 1.35 | bioconda |
+| [Python](https://www.python.org/) | 3.12 | conda-forge |
 | [Biopython](https://biopython.org/) | — | conda-forge |
 | [fuzzysearch](https://github.com/taleinat/fuzzysearch) | — | conda-forge (used by `spatialmeth_trimtag.py` for R1 adapter scan) |
 | [regex](https://pypi.org/project/regex/) | — | conda-forge (smcseq fuzzy linker patterns) |
@@ -107,7 +92,7 @@ All invocations use **absolute** paths for `--profile` and `--snakefile` so the 
 **Local / HPC (no scheduler):**
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/local_HPC" \
+python -s -m snakemake --profile "$REPO/profiles/local_HPC" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38
 ```
@@ -122,29 +107,29 @@ capacity_value() {
 rule_cpus=$(capacity_value paired_rule_cpus_now)
 controller_cpus=$(capacity_value controller_cpus_now)
 controller_mem=$(capacity_value controller_memory_mb)
-snakemake --profile "$REPO/profiles/slurm" \
+python -s -m snakemake --profile "$REPO/profiles/slurm" \
     --snakefile "$REPO/main/Snakefile" \
     --cores "$controller_cpus" --jobs 4 \
     --resources cpus_per_task="$controller_cpus" mem_mb="$controller_mem" \
     --config ref=hg38 \
         DNA_TRIM_CPUS="$rule_cpus" \
         DNA_ALIGN_CPUS="$rule_cpus" \
-        DNA_PILEUP_CPUS="$rule_cpus" \
-        UNMATCHED_ALIGN_CPUS="$rule_cpus"
+        DNA_PILEUP_CPUS="$rule_cpus"
 ```
 
 With an otherwise empty account under a 144-CPU cap, the helper returns a
-138-CPU controller and 69 CPUs per heavy rule, allowing one sample's matched
-and unmatched DNA alignments to run together. Heavy DNA rules mirror their allocation in
+138-CPU controller and 69 CPUs per heavy rule, leaving capacity for independent
+DNA and RNA branches or multiple samples to progress together. Heavy DNA rules mirror their allocation in
 both native Snakemake `threads` and the profile's `cpus_per_task` resource;
 set both controller limits to the same budget. The native thread ledger stops
 over-submission, while `cpus_per_task` supplies the Slurm allocation.
 On the lab cluster, run `tools/slurm_dna_capacity.sh` immediately before
 submission because the `defq` per-user limit changes dynamically. The defaults
 fit two heavy rules plus six spare CPUs under the current 144-CPU limit. Set
-the two controller values and `DNA_{TRIM,ALIGN}_CPUS`/
-`UNMATCHED_ALIGN_CPUS` to the helper's reported budgets if the live limit or
-existing allocation differs. Set the global `mem_mb` resource to its reported
+the two controller values and `DNA_{TRIM,ALIGN,PILEUP}_CPUS` to the helper's
+reported budgets if the live limit or existing allocation differs. When
+optional BAM-backed unmatched diagnostics are enabled, also set
+`UNMATCHED_ALIGN_CPUS` to that rule budget. Set the global `mem_mb` resource to its reported
 `controller_memory_mb` value so concurrent samples also respect the QOS memory
 cap after current job allocations; the helper reserves 40 GiB by default. For
 an unmatched-only restart, use `single_rule_cpus_now` instead of the paired
@@ -154,7 +139,7 @@ The default target is `final_output`. To run it explicitly, append the target af
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/slurm" \
+python -s -m snakemake --profile "$REPO/profiles/slurm" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- final_output
@@ -164,7 +149,7 @@ The examples above run the default `spatialdmt` protocol on `hg38`. For the **`s
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/slurm" \
+python -s -m snakemake --profile "$REPO/profiles/slurm" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=mm10 protocol=smcseq \
         FASTQ_DIR=/scr1/users/you/run/fastq \
@@ -179,9 +164,7 @@ Required profile config keys (set in `profiles/local_HPC/config.yaml` or `profil
 | Key | Description |
 |-----|-------------|
 | `ref` | Genome reference key (`hg38` or `mm10`) |
-| `REF_DIR` | Root directory of reference files |
-| `BBDUK` | Path to `bbduk.sh` executable |
-| `PYTHON` | Python interpreter with biopython, fuzzysearch, matplotlib, and pandas installed |
+| `REF_DIR` | Root directory of reference files; see [reference preparation](docs/reference_setup.md) |
 
 Optional path config keys (override via `--config KEY=VALUE` or in profile config.yaml). Defaults are cwd-relative, so the historical "run snakemake from the workdir" pattern still works unchanged.
 
@@ -191,14 +174,19 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 | `WORKDIR` | `pipeline_output` | Intermediate outputs (merged tagged FASTQs, merged BAM, per-cell BAMs, VCFs, qc/). Accepts absolute paths. |
 | `OUTDIR` | `final_output` | Per-sample deliverable bundle (`.cg`, qc reports, gene matrix). Accepts absolute paths. |
 | `protocol` | `spatialdmt` | R2 chemistry: `spatialdmt` (50×50 grid, 8+8 bp barcodes) or `smcseq` (96×96 grid, 11+11 bp barcodes). See [R2 chemistry](#r2-chemistry-protocol-switch) for grammar details. |
+| `PYTHON` | `python` | Python executable from the active environment. |
+| `BBDUK` | `bbduk.sh` | BBTools adapter/filter executable. |
+| `YAME` | `yame` | YAME executable. |
+| `STAR_BIN` | `STAR` | STAR/STARsolo executable. No environment module is loaded implicitly. |
 | `DUPSIFTER` | `tools/dupsifter_speed/dupsifter` | Path to dupsifter. The default optimized vendored build is created automatically and retains the 1.3.x `-B` behavior. |
 | `CB_SPLITTER` | `tools/split_bam_by_cb_hts/split_bam_by_cb_hts` | Compiled CB-tag BAM splitter; built automatically. |
 | `MERGECG_CONTEXT` | `tools/mergecg_context/mergecg_context` | Context-aware single-cell CpG strand merger; built automatically and avoids repeated reference loads. |
 | `DNA_TRIM_CPUS` | `69` | CPUs allocated to streaming trim/barcode assignment. |
 | `DNA_TRIM_OVERHEAD_CPUS` | `4` | Allocated trim CPUs reserved for paired decompression and stream dispatch. |
 | `DNA_TRIM_WORKERS` | `DNA_TRIM_CPUS - DNA_TRIM_OVERHEAD_CPUS` | Python trim workers; override only after measuring total job CPU use. |
-| `DNA_TRIM_BLOCK_SIZE` | `auto` | GNU Parallel block size. Auto selects 64, 256, or 512 MiB from input size. |
+| `DNA_TRIM_BLOCK_SIZE` | `auto` | Newline-aligned stream block size. Auto selects 64, 256, or 512 MiB from input size. |
 | `DNA_TRIM_COMPRESSION_LEVEL` | `1` | Gzip level for trim FASTQs. This time-first default was 5% faster than level 3 with 14% larger output in the fixed deep-concurrency benchmark. |
+| `DNA_TRIM_COMPRESSION_BACKEND` | `gzip` | Per-worker compressor (`gzip` or `pigz`). The default avoids spawning several compressor processes per trim worker. |
 | `DNA_TRIM_MEM` | `160G` | Memory for deep streaming trim at the default worker count. |
 | `DNA_ALIGN_CPUS` | `69` | CPUs allocated to matched BISCUIT alignment. |
 | `DNA_ALIGN_MEM` | `400G` | Memory for deep matched alignment, deduplication, and sort. |
@@ -209,9 +197,11 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 | `PILEUP_WINDOW_STEP` | `1000000` | Bases per BISCUIT pileup dispatch window; 1 Mb was fastest without the memory growth of larger windows. |
 | `LAMBDA_ALIGN_CPUS` | `48` | CPUs allocated to lambda BISCUIT alignment. |
 | `LAMBDA_ALIGN_SORT_CPUS` | `24` | `samtools sort` threads inside the lambda allocation. |
+| `LAMBDA_PILEUP_MAX_MAPPED` | `2000000` | Deterministic cap on mapped lambda records supplied to pileup, preventing numerical overflow at extreme spike-in depth; full-BAM alignment metrics are retained and sampling is recorded in `qc/table/`. |
 | `UNMATCHED_ALIGN_CPUS` | `69` | CPUs allocated to unmatched BISCUIT alignment. |
 | `UNMATCHED_ALIGN_MEM` | `400G` | Memory for deep unmatched alignment, deduplication, and sort. |
 | `UNMATCHED_SORT_CPUS` | `16` | `samtools sort` threads inside the unmatched allocation. |
+| `UNMATCHED_DIAGNOSTICS_WITH_BAM` | `false` | Add unmatched-read genomic mapping and duplication fields by aligning the unmatched FASTQs. FASTQ-level failure decomposition is always generated. |
 | `SORT_LOCAL_MIN_GB` | `250` | Minimum free local scratch before sort can use it. Input-aware checks may require more. |
 | `SORT_LOCAL_INPUT_FACTOR` | `3` | Estimated BAM/sort-scratch bytes per compressed alignment-input byte. |
 | `SORT_LOCAL_HEADROOM_GB` | `20` | Free space retained on the sort-scratch filesystem. |
@@ -219,7 +209,7 @@ Optional path config keys (override via `--config KEY=VALUE` or in profile confi
 
 Example with absolute paths (keeps intermediates and deliverables on separate disks):
 ```bash
-snakemake --profile "$REPO/profiles/slurm" \
+python -s -m snakemake --profile "$REPO/profiles/slurm" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=mm10 \
         FASTQ_DIR=/scratch/run42/fastq \
@@ -277,13 +267,13 @@ Switch with `--config protocol=smcseq` — see the [smcseq run example](#running
 
 Matched reads (BC1+BC2 hit the whitelist, exact or Hamming-1) get an 8-char ACGT CB tag encoding their (X, Y) coord (`tools/cb_codec.py`; the ACGT encoding is required because `dupsifter -B` silently collapses any non-{ACGTN} CB tag to a single bucket), and flow through one merged FASTQ → one biscuit alignment → cell-aware `dupsifter -B` → bounded bucketed per-cell BAM split (`tools/split_bam_by_cb_bucketed.sh`) → per-cell pileup.
 
-Unmatched reads — structure-fail (`_SF` suffix in read name) and whitelist-miss (`_WM`) — are split off at the trim step into a parallel `Unmatched_R{1,2}.fq.gz` pair, aligned independently into `bam_unmatched/`, and summarised by `mqc_unmatched_diagnostics`. They never enter the merged BAM, so per-cell stats stay clean.
+Unmatched reads — structure-fail (`_SF` suffix in read name) and whitelist-miss (`_WM`) — are split off at the trim step into a parallel `Unmatched_R{1,2}.fq.gz` pair and summarized directly by `mqc_unmatched_diagnostics`. They never enter the merged BAM, so per-cell stats stay clean. Set `UNMATCHED_DIAGNOSTICS_WITH_BAM=true` only when genomic mapping and duplication fields are needed for this diagnostic bucket.
 
 This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawned ~9216 BISCUIT invocations per sample.
 
 **DNA methylation branch (matched track):**
 
-1. `dna_trim_and_tag` — Adapter trim (R1) + structural-prefix parse (R2: primer + BC1 + linker + BC2 + linker + Tn5 ME [+ UMI for smcseq]). Look up BC1+BC2 in the whitelist (Hamming-1 tolerated), encode the matched (X, Y) coord as an 8-char ACGT string, rewrite each read name as `<origid>_<CB>_<UMI>`. Emits one merged R1/R2 tagged FASTQ pair for matched reads, plus a separate `Unmatched_R{1,2}.fq.gz` pair for structure-fail + whitelist-miss reads (`tools/spatialmeth_trimtag.py`; paired block streaming via GNU parallel, without raw temporary FASTQs).
+1. `dna_trim_and_tag` — Adapter trim (R1) + structural-prefix parse (R2: primer + BC1 + linker + BC2 + linker + Tn5 ME [+ UMI for smcseq]). Look up BC1+BC2 in the whitelist (Hamming-1 tolerated), encode the matched (X, Y) coord as an 8-char ACGT string, rewrite each read name as `<origid>_<CB>_<UMI>`. Emits one merged R1/R2 tagged FASTQ pair for matched reads, plus a separate `Unmatched_R{1,2}.fq.gz` pair for structure-fail + whitelist-miss reads (`tools/spatialmeth_trimtag.py`; paired blocks are dispatched by the bounded `tools/stream_parallel.py` coordinator, without raw temporary FASTQs).
 2. `dna_biscuit_align` — One `biscuit align -9` over the matched-track FASTQ pair → `dupsifter -B` (cell-aware, BS-correct dedup via the CB tag) → `samtools sort` → per-cell BAM split keyed on CB. Outputs `bam_merged/{sample}_merged_dedup.bam` and `bam/<XXYY>.bam` per cell — every CB is a real whitelist coord, no sentinel cell.
 3. `dna_biscuit_pileup` — CpG methylation pileup per per-cell BAM (parallel via GNU parallel), VCF→BED conversion, strand merging, CpG BED intersection, packing into a yame `.cg` file indexed by cell coord. Also writes per-cell `tmp/pileup/{XXYY}.conv.tsv` (CA/CC/CG/CT β-sum + count) and pools them into the sample-level `qc/biscuit_qc/{sample}_totalBaseConversionRate.txt` — one pileup per cell, no second sample-level pileup anywhere.
 4. `dna_biscuit_align_lambda` — Align reads to the lambda genome for bisulfite conversion efficiency estimation. **Inputs differ by protocol**: `spatialdmt` uses the dedicated `trim/{sample}_Lambda_R{1,2}.fq.gz` files emitted by the trim step (barcode-85 reads only); `smcseq` aligns the FULL matched-track FASTQ pair to lambda since there's no dedicated lambda barcode in that protocol.
@@ -291,9 +281,9 @@ This replaces the original per-cell-FASTQ-then-per-cell-BISCUIT path which spawn
 
 **DNA methylation branch (unmatched track):**
 
-6. `dna_biscuit_align_unmatched` — `biscuit align` + `dupsifter` (no `-B`, no `-9`) on the Unmatched FASTQ pair → `samtools sort`. Single sample-level BAM at `bam_unmatched/{sample}_unmatched.bam`.
-7. `mqc_unmatched_biscuit` — Runs `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample, surfacing it as its own MultiQC entry parallel to (not mixed with) the matched-track sample-level entry.
-8. `mqc_unmatched_diagnostics` — Bucket unmatched reads by `_SF`/`_WM` suffix; for SF reads, re-run the R2 anchor regexes to identify which structural anchor (primer, linker1, linker2, Tn5 ME, ...) failed first. Emits a per-sample diagnostic TSV and a single MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
+6. `mqc_unmatched_diagnostics` — Bucket unmatched reads by `_SF`/`_WM` suffix; for SF reads, re-run the R2 anchor regexes to identify which structural anchor (primer, linker1, linker2, Tn5 ME, ...) failed first. Emits a per-sample diagnostic TSV and a single MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`). This FASTQ-level analysis is part of the default `final_output` target.
+7. `dna_biscuit_align_unmatched` — Optional when `UNMATCHED_DIAGNOSTICS_WITH_BAM=true`: `biscuit align` + `dupsifter` (no `-B`, no `-9`) on the unmatched FASTQ pair → `samtools sort`, producing `bam_unmatched/{sample}_unmatched.bam` and adding genomic mapping and duplication fields to the diagnostic table.
+8. `mqc_unmatched_biscuit` — Optional explicit target that runs `tools/spatialmeth_qc.sh` on the unmatched BAM as one pseudo-sample. It is not required by `final_output`.
 
 **RNA branch (runs in parallel with DNA; skipped if `RNA_1.fq*` is absent):**
 
@@ -316,8 +306,8 @@ pipeline_output/{sample}/
   bam_merged/        # one big {sample}_merged_dedup.bam (matched track, post-align + dupsifter -B)
   bam/               # per-cell BAMs named <XXYY>.bam plus compact CSI indexes (from the bucketed
                      #   C splitter); every CB is a real whitelist coord, no sentinel bucket
-  bam_unmatched/     # {sample}_unmatched.bam — sample-level alignment of the Unmatched fastqs
-                     #   (no -9, no -B; position-only dedup since there's no real cell here)
+  bam_unmatched/     # optional {sample}_unmatched.bam when UNMATCHED_DIAGNOSTICS_WITH_BAM=true
+                     #   (no -9, no -B; position-only dedup since there is no real cell here)
   bam_lambda/        # lambda BAM with flagstat and dupsifter stats
   pileup/            # {sample}.cg + {sample}.cg.idx (yame packed CpG methylation indexed by cell)
                      #   and {sample}_Lambda.cg
@@ -335,6 +325,7 @@ final_output/{sample}/
   {sample}.cg              # genomic CpG methylation matrix
   {sample}.cg.idx          # yame index for {sample}.cg
   {sample}_Lambda.cg       # lambda spike-in CpG methylation matrix
+  {sample}_lambda_pileup_sampling.tsv # lambda pileup depth and sampling provenance
   pipeline_version.tsv     # release, protocol, reference, and assignment label
   qc_report.html           # self-contained QC report
   multiqc_report.html      # MultiQC report
@@ -355,7 +346,7 @@ Run after preprocessing. Produces BISCUIT QC tables for every barcode, a MultiQC
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/local_HPC" \
+python -s -m snakemake --profile "$REPO/profiles/local_HPC" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- qc
@@ -370,8 +361,8 @@ QC rules are named by their **consumer**: `mqc_*` produce inputs to MultiQC (eit
 
 **MultiQC inputs (unmatched track):**
 
-- `mqc_unmatched_biscuit` — `tools/spatialmeth_qc.sh` on the unmatched BAM as ONE pseudo-sample → its own MultiQC entry.
-- `mqc_unmatched_diagnostics` — SF/WM bucket breakdown + R2 anchor-fail analysis; emits MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`).
+- `mqc_unmatched_diagnostics` — Default SF/WM bucket breakdown + R2 anchor-fail analysis from unmatched FASTQ; emits MultiQC custom-content `_mqc.tsv` (`tools/unmatched_diagnostics.py`). Mapping and duplication fields are included when `UNMATCHED_DIAGNOSTICS_WITH_BAM=true`.
+- `mqc_unmatched_biscuit` — Optional explicit `tools/spatialmeth_qc.sh` target on the unmatched BAM as one pseudo-sample.
 
 **Spatial map (per-cell):**
 
@@ -416,7 +407,7 @@ Optional. Run after preprocessing and **before** clean (requires tmp/ pileup VCF
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/local_HPC" \
+python -s -m snakemake --profile "$REPO/profiles/local_HPC" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- allc
@@ -437,7 +428,7 @@ Removes `pipeline_output/{sample}/tmp/` and `pipeline_output/{sample}/qc/tmp/` (
 
 ```bash
 REPO=/absolute/path/to/Spatial-DMT-2024
-snakemake --profile "$REPO/profiles/local_HPC" \
+python -s -m snakemake --profile "$REPO/profiles/local_HPC" \
     --snakefile "$REPO/main/Snakefile" \
     --config ref=hg38 \
     -- clean

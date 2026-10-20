@@ -43,7 +43,7 @@ Usage:
         --bsconv-log ... \\
         --merged-dupstat ... \\
         --biscuit-conv ... \\
-        --cg ... \\
+        --cg-summary ... \\
         --lambda-flagstat ... \\
         --lambda-cg ... \\
         --output {sample}_curated_metrics_mqc.tsv
@@ -219,6 +219,24 @@ def parse_biscuit_conv(path):
            f(d.get('CG', 'nan')), f(d.get('CT', 'nan'))
 
 
+def parse_yame_summary(text):
+    """Return (n_query, depth, beta) from YAME summary text."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return float('nan'), float('nan'), float('nan')
+    header = lines[0].split('\t')
+    row = lines[1].split('\t')
+    values = dict(zip(header, row))
+
+    def number(key):
+        try:
+            return float(values.get(key, 'nan'))
+        except (TypeError, ValueError):
+            return float('nan')
+
+    return number('N_query'), number('Depth'), number('Beta')
+
+
 def yame_summary(cg_path, yame='yame', aggregate_cells=False):
     """Return (n_query, depth, beta) from a yame summary first data row.
 
@@ -248,16 +266,12 @@ def yame_summary(cg_path, yame='yame', aggregate_cells=False):
             raise subprocess.CalledProcessError(rowop_ret, rowop.args)
     else:
         out = subprocess.check_output([yame, 'summary', cg_path], text=True)
-    lines = [l for l in out.splitlines() if l.strip()]
-    if len(lines) < 2:
-        return float('nan'), float('nan'), float('nan')
-    hdr = lines[0].split('\t')
-    row = lines[1].split('\t')
-    d = dict(zip(hdr, row))
-    def f(k):
-        try: return float(d.get(k, 'nan'))
-        except (TypeError, ValueError): return float('nan')
-    return f('N_query'), f('Depth'), f('Beta')
+    return parse_yame_summary(out)
+
+
+def yame_summary_file(path):
+    with open(path) as handle:
+        return parse_yame_summary(handle.read())
 
 
 def main():
@@ -268,12 +282,15 @@ def main():
     p.add_argument('--bsconv-log')
     p.add_argument('--merged-dupstat',  required=True)
     p.add_argument('--biscuit-conv',    required=True)
-    p.add_argument('--cg',              required=True)
+    p.add_argument('--cg')
+    p.add_argument('--cg-summary')
     p.add_argument('--lambda-flagstat', required=True)
     p.add_argument('--lambda-cg',       required=True)
     p.add_argument('--yame',            default='yame')
     p.add_argument('--output',          required=True)
     args = p.parse_args()
+    if not args.cg and not args.cg_summary:
+        p.error('one of --cg or --cg-summary is required')
 
     pre_flagstat = args.pre_filter_flagstat or args.merged_flagstat
     pre_metrics         = parse_flagstat(pre_flagstat)
@@ -281,11 +298,14 @@ def main():
     dup_rate            = parse_dupsifter(args.merged_dupstat)
     ca, cc, cg, ct      = parse_biscuit_conv(args.biscuit_conv)
     lam_metrics         = parse_flagstat(args.lambda_flagstat)
-    nq,  depth, _       = yame_summary(
-        args.cg,
-        yame=args.yame,
-        aggregate_cells=True,
-    )
+    if args.cg_summary:
+        nq, depth, _ = yame_summary_file(args.cg_summary)
+    else:
+        nq, depth, _ = yame_summary(
+            args.cg,
+            yame=args.yame,
+            aggregate_cells=True,
+        )
     _,   _,     lam_beta = yame_summary(args.lambda_cg, yame=args.yame)
 
     total = pre_metrics['primary']

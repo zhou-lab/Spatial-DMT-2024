@@ -1,6 +1,10 @@
 import os
 import glob
 
+# Keep rule subprocesses on the release environment even when the account has
+# same-version packages installed under ~/.local.
+os.environ["PYTHONNOUSERSITE"] = "1"
+
 # Resolve the genome-specific ref dict from site.yaml using the 'ref' config key
 target_ref = config.get("ref", "")
 if target_ref in config:
@@ -48,7 +52,7 @@ def require_config(key):
     return config[key]
 
 REF_DIR      = require_config("REF_DIR")
-PYTHON       = require_config("PYTHON")
+PYTHON       = config.get("PYTHON", "python")
 BARCODES_DIR = os.path.join(workflow.basedir, "..", "barcodes")
 VERSION_FILE = os.path.join(workflow.basedir, "..", "VERSION")
 VERSION_WRITER = os.path.join(
@@ -192,14 +196,16 @@ rule pipeline_version:
 ##      per-cell .conv.tsv (CA/CC/CG/CT beta sum+cnt) pooled to
 ##      sample-level _totalBaseConversionRate.txt for the curated table.
 ##
-## Unmatched track runs in parallel: dna_biscuit_align_unmatched on the
-## separate fastq, mqc_unmatched_biscuit + mqc_unmatched_diagnostics surface
-## the bucket as its own MultiQC entry.
+## Unmatched diagnostics run from the separate FASTQ by default. Optional
+## unmatched BAM alignment adds mapping/duplication fields when
+## UNMATCHED_DIAGNOSTICS_WITH_BAM=true; mqc_unmatched_biscuit remains an
+## explicit optional target.
 ##
 ## Replaces the original demux-before-align path which spawned ~9216 biscuit
 ## invocations per sample.
 TOOLS_DIR = os.path.join(workflow.basedir, "..", "tools")
 TRIM_SCRIPT = os.path.join(TOOLS_DIR, "spatialmeth_trimtag.py")
+STREAM_PARALLEL = os.path.join(TOOLS_DIR, "stream_parallel.py")
 CB_CODEC = os.path.join(TOOLS_DIR, "cb_codec.py")
 FUZZY_MATCHER = os.path.join(TOOLS_DIR, "fuzzy_match.py")
 LOCAL_DUPSIFTER_DIR = os.path.join(TOOLS_DIR, "dupsifter_speed")
@@ -220,10 +226,9 @@ CPG_COORDINATE_INDEX = os.path.join(
     ".reference_cache",
     f"{GENOME.replace(os.sep, '_')}.cpgidx",
 )
-YAME = config.get(
-    "YAME",
-    "/mnt/isilon/zhoulab/labsoftware/anaconda/conda_2026/bin/yame",
-)
+YAME = config.get("YAME", "yame")
+STAR_BIN = config.get("STAR_BIN", "STAR")
+YAME_SUMMARY_HELPER = os.path.join(TOOLS_DIR, "yame_sample_summaries.sh")
 SMCSEQ_BSCONV_ARGS = config.get("SMCSEQ_BSCONV_ARGS", "-m 2")
 DNA_TRIM_CPUS = int(config.get("DNA_TRIM_CPUS", 69))
 DNA_TRIM_OVERHEAD_CPUS = int(config.get("DNA_TRIM_OVERHEAD_CPUS", 4))
@@ -239,8 +244,14 @@ if DNA_TRIM_CPUS < 1 or DNA_TRIM_OVERHEAD_CPUS < 0 or DNA_TRIM_WORKERS < 1:
 DNA_TRIM_WORKERS = min(DNA_TRIM_WORKERS, DNA_TRIM_CPUS)
 DNA_TRIM_BLOCK_SIZE = config.get("DNA_TRIM_BLOCK_SIZE", "auto")
 DNA_TRIM_COMPRESSION_LEVEL = int(config.get("DNA_TRIM_COMPRESSION_LEVEL", 1))
+DNA_TRIM_COMPRESSION_BACKEND = config.get(
+    "DNA_TRIM_COMPRESSION_BACKEND",
+    "gzip",
+)
 if not 0 <= DNA_TRIM_COMPRESSION_LEVEL <= 9:
     raise ValueError("DNA_TRIM_COMPRESSION_LEVEL must be between 0 and 9.")
+if DNA_TRIM_COMPRESSION_BACKEND not in {"gzip", "pigz"}:
+    raise ValueError("DNA_TRIM_COMPRESSION_BACKEND must be gzip or pigz.")
 DNA_ALIGN_CPUS = int(config.get("DNA_ALIGN_CPUS", 69))
 DNA_ALIGN_SORT_CPUS = int(config.get("DNA_ALIGN_SORT_CPUS", 16))
 DNA_PILEUP_CPUS = int(config.get("DNA_PILEUP_CPUS", DNA_ALIGN_CPUS))
@@ -256,6 +267,9 @@ UNMATCHED_SORT_CPUS = int(config.get("UNMATCHED_SORT_CPUS", 16))
 UNMATCHED_DIAGNOSTICS_CPUS = int(config.get("UNMATCHED_DIAGNOSTICS_CPUS", 24))
 LAMBDA_ALIGN_CPUS = int(config.get("LAMBDA_ALIGN_CPUS", 48))
 LAMBDA_ALIGN_SORT_CPUS = int(config.get("LAMBDA_ALIGN_SORT_CPUS", 24))
+LAMBDA_PILEUP_MAX_MAPPED = int(
+    config.get("LAMBDA_PILEUP_MAX_MAPPED", 2_000_000)
+)
 DNA_SPLIT_JOBS = min(int(config.get("DNA_SPLIT_JOBS", DNA_ALIGN_CPUS)), DNA_ALIGN_CPUS)
 DNA_SPLIT_BUCKET_THREADS = int(
     config.get("DNA_SPLIT_BUCKET_THREADS", min(32, max(1, DNA_ALIGN_CPUS - 1)))
@@ -274,6 +288,7 @@ for setting, value in {
     "UNMATCHED_DIAGNOSTICS_CPUS": UNMATCHED_DIAGNOSTICS_CPUS,
     "LAMBDA_ALIGN_CPUS": LAMBDA_ALIGN_CPUS,
     "LAMBDA_ALIGN_SORT_CPUS": LAMBDA_ALIGN_SORT_CPUS,
+    "LAMBDA_PILEUP_MAX_MAPPED": LAMBDA_PILEUP_MAX_MAPPED,
     "DNA_SPLIT_JOBS": DNA_SPLIT_JOBS,
     "DNA_SPLIT_BUCKET_THREADS": DNA_SPLIT_BUCKET_THREADS,
 }.items():
@@ -423,6 +438,7 @@ rule dna_trim_and_tag:
         r2 = lambda wildcards: get_fastq(wildcards, "DNA_2"),
         wl = BARCODE_WHITELIST,
         trim_script = TRIM_SCRIPT,
+        stream_parallel = STREAM_PARALLEL,
         cb_codec = CB_CODEC,
         fuzzy_matcher = FUZZY_MATCHER,
     output:
@@ -441,6 +457,7 @@ rule dna_trim_and_tag:
         workers = DNA_TRIM_WORKERS,
         overhead_cpus = DNA_TRIM_OVERHEAD_CPUS,
         compression_level = DNA_TRIM_COMPRESSION_LEVEL,
+        compression_backend = DNA_TRIM_COMPRESSION_BACKEND,
         storage_headroom_gb = STORAGE_HEADROOM_GB,
     shell:
         """
@@ -491,10 +508,10 @@ rule dna_trim_and_tag:
         echo "trim workers: $workers of {resources.cpus_per_task} allocated CPUs" >&2
 
         set +e
-        paste /dev/fd/3 /dev/fd/4 | parallel --plain --halt soon,fail=1 --pipe \
-            --block "$block_size" --recend '\\n' \
-            -j "$workers" '
-            PYTHONHASHSEED=0 {PYTHON} {input.trim_script} \
+        paste /dev/fd/3 /dev/fd/4 | {PYTHON} {input.stream_parallel} \
+            --jobs "$workers" --block "$block_size" \
+            --env PYTHONHASHSEED=0 -- \
+            {PYTHON} {input.trim_script} \
                 - - --paired-tab-stdin \
                 -o {WORKDIR}/{wildcards.sample}/tmp/trim/_out_{{#}} \
                 -a CTATCTCTTATA AGATGCGAGAAGCCAACGCTTG \
@@ -507,8 +524,7 @@ rule dna_trim_and_tag:
                 --matcher exact-seeded \
                 --skip-barcode-counts \
                 --compression-level {params.compression_level} \
-                --compression-backend gzip
-        '
+                --compression-backend {params.compression_backend}
         stream_status=$?
         exec 3<&-
         exec 4<&-
@@ -868,22 +884,54 @@ rule dna_biscuit_pileup_lambda:
     input:
         bam = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam",
         bai = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.bai",
+        flagstat = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
     output:
         vcf  = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda.vcf.gz",
         tbi  = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda.vcf.gz.tbi",
         allc = WORKDIR + "/{sample}/tmp/pileup_lambda/{sample}_Lambda_allc.bed",
         cg   = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
+        sampling = WORKDIR + "/{sample}/qc/table/{sample}_lambda_pileup_sampling.tsv",
     threads: 4
     resources:
         mem = config.get("LAMBDA_PILEUP_MEM", "64G"),
         time = "24:00:00",
         cpus_per_task = threads,
+    params:
+        max_mapped = LAMBDA_PILEUP_MAX_MAPPED,
     shell:
         """
-        set -xe
+        set -xeo pipefail
         mkdir -p {WORKDIR}/{wildcards.sample}/tmp/pileup_lambda/ \
-                 {WORKDIR}/{wildcards.sample}/pileup/
-        biscuit pileup -m 0 -a 0 -c -u -p -@ {resources.cpus_per_task} {LAMBDA_REF_FASTA} {input.bam} | \
+                 {WORKDIR}/{wildcards.sample}/pileup/ \
+                 {WORKDIR}/{wildcards.sample}/qc/table/
+
+        # Lambda can reach tens of thousands of aligned bases per reference
+        # position in deep libraries. BISCUIT's genotype beta-function can
+        # overflow at that depth, while conversion estimation needs only a
+        # representative subset. samtools subsampling is deterministic by
+        # read name and therefore keeps paired records together.
+        mapped=$(awk '/ mapped \\(/{{print $1; exit}}' {input.flagstat})
+        pileup_bam={input.bam}
+        fraction=1
+        sampled_mapped=$mapped
+        sampled_bam={WORKDIR}/{wildcards.sample}/tmp/pileup_lambda/{wildcards.sample}_Lambda.sampled.bam
+        if (( mapped > {params.max_mapped} )); then
+            fraction=$(awk -v cap={params.max_mapped} -v n="$mapped" \
+                'BEGIN {{printf "%.12f", cap/n}}')
+            samtools view -@ {resources.cpus_per_task} -bh -F 4 \
+                --subsample-seed 1 --subsample "$fraction" \
+                -o "$sampled_bam" {input.bam}
+            samtools index -@ {resources.cpus_per_task} "$sampled_bam"
+            pileup_bam=$sampled_bam
+            sampled_mapped=$(samtools view -@ {resources.cpus_per_task} -c -F 4 "$sampled_bam")
+        fi
+        printf 'sample\toriginal_mapped_records\tpileup_mapped_records\tsampling_fraction\tmax_mapped_records\n' \
+            > {output.sampling}
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            '{wildcards.sample}' "$mapped" "$sampled_mapped" "$fraction" '{params.max_mapped}' \
+            >> {output.sampling}
+
+        biscuit pileup -m 0 -a 0 -c -u -p -@ {resources.cpus_per_task} {LAMBDA_REF_FASTA} "$pileup_bam" | \
             bgzip -c > {output.vcf}
         tabix -p vcf {output.vcf}
         biscuit vcf2bed -t c  -c {output.vcf} > {output.allc}
@@ -985,7 +1033,7 @@ rule dna_biscuit_align_unmatched:
 # RNA Pipeline Rules
 ################################################################################
 
-bbduk        = require_config("BBDUK")
+bbduk        = config.get("BBDUK", "bbduk.sh")
 STAR_REF_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, "STAR")
 
 if PROTOCOL == "smcseq":
@@ -1143,9 +1191,8 @@ rule rna_star_solo:
         cpus_per_task = threads,
     shell:
         """
-        if command -v module >/dev/null 2>&1; then module load STAR || true; fi
         mkdir -p {WORKDIR}/{wildcards.sample}/rna_STAR/
-        STAR --runThreadN {resources.cpus_per_task} \
+        {STAR_BIN} --runThreadN {resources.cpus_per_task} \
             --genomeDir {STAR_REF_DIR} \
             --readFilesIn {input.read_Seq} {input.read_BC} \
             --soloType CB_UMI_Simple \
@@ -1294,6 +1341,31 @@ rule mqc_unmatched_diagnostics:
 ## mapped, lambda methylation retention). Emits a custom-content _mqc.tsv with
 ## per-column tooltip descriptions (YAML header) that MultiQC picks up under
 ## qc/biscuit_qc_merged/, alongside the unmatched diagnostic _mqc.
+FEATURE_DIR    = os.path.join(REF_DIR, GENOME_FOR_PATH, "features")
+FEATURE_CM_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, f"KYCGKB_{GENOME_FOR_PATH}")
+CHROMHMM_CM    = os.path.join(REF_DIR, ref["REF_BASE"], ref["CHROMHMM_CM"])
+
+rule yame_sample_summaries:
+    input:
+        cg = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        chromhmm_cm = CHROMHMM_CM,
+        helper = YAME_SUMMARY_HELPER,
+    output:
+        aggregate = WORKDIR + "/{sample}/qc/table/{sample}_cpg_summary.tsv",
+        chromhmm = WORKDIR + "/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
+    threads: 1
+    resources:
+        mem = "4G",
+        time = "12:00:00",
+        cpus_per_task = threads,
+    shell:
+        """
+        {input.helper} --yame {YAME} --cg {input.cg} \
+            --aggregate-output {output.aggregate} \
+            --chromhmm-cm {input.chromhmm_cm} \
+            --chromhmm-output {output.chromhmm}
+        """
+
 rule mqc_curated:
     input:
         merged_bam       = DNA_QC_MERGED_BAM,
@@ -1301,7 +1373,7 @@ rule mqc_curated:
         pre_filter_flagstat = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.bam.flagstat",
         merged_dupstat   = WORKDIR + "/{sample}/bam_merged/{sample}_merged_dedup.dupsifter.stat",
         biscuit_conv     = WORKDIR + "/{sample}/qc/biscuit_qc/{sample}_totalBaseConversionRate.txt",
-        cg               = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        cg_summary       = WORKDIR + "/{sample}/qc/table/{sample}_cpg_summary.tsv",
         lambda_flagstat  = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
         lambda_cg        = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
     output:
@@ -1326,16 +1398,13 @@ rule mqc_curated:
             {params.bsconv_log_arg} \
             --merged-dupstat   {input.merged_dupstat} \
             --biscuit-conv     {input.biscuit_conv} \
-            --cg               {input.cg} \
+            --cg-summary       {input.cg_summary} \
             --lambda-flagstat  {input.lambda_flagstat} \
             --lambda-cg        {input.lambda_cg} \
             --yame             {YAME} \
             --output           {output.mqc}
         """
 
-FEATURE_DIR    = os.path.join(REF_DIR, GENOME_FOR_PATH, "features")
-FEATURE_CM_DIR = os.path.join(REF_DIR, GENOME_FOR_PATH, f"KYCGKB_{GENOME_FOR_PATH}")
-CHROMHMM_CM    = os.path.join(REF_DIR, ref["REF_BASE"], ref["CHROMHMM_CM"])
 if GENOME_FOR_PATH == "hg38":
     FEATS = ["ChromHMM.20220303", "Win100k.20220228", "Chromosome.20221129"]
 else:
@@ -1406,7 +1475,7 @@ rule qc_report:
         spatial_counts = WORKDIR + "/{sample}/qc/table/{sample}_spatial_barcode_counts.tsv",
         trim_stats     = WORKDIR + "/{sample}/trim/{sample}_trim_stats.txt",
         lambda_flagstat = WORKDIR + "/{sample}/bam_lambda/{sample}_Lambda.bam.flagstat",
-        cg             = WORKDIR + "/{sample}/pileup/{sample}.cg",
+        chromhmm_sum   = WORKDIR + "/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
         plots_done     = WORKDIR + "/{sample}/qc/plots/.done",
         ## Unmatched-track diagnostic _mqc, also lands in qc/biscuit_qc_merged/.
         unmatched_summary = WORKDIR + "/{sample}/qc/biscuit_qc_merged/{sample}_unmatched_summary_mqc.tsv",
@@ -1418,7 +1487,6 @@ rule qc_report:
         multiqc_data = directory(WORKDIR + "/{sample}/qc/html/multiqc_report_data"),
         report       = WORKDIR + "/{sample}/qc/html/qc_report.html",
         stats_mqc    = WORKDIR + "/{sample}/qc/table/{sample}_stats_mqc.tsv",
-        chromhmm_sum = WORKDIR + "/{sample}/qc/table/{sample}_chromhmm_summary.tsv",
     params:
         diagnostic_rna_args = diagnostic_rna_args,
         report_rna_args = qc_report_rna_args,
@@ -1430,14 +1498,10 @@ rule qc_report:
         """
         mkdir -p {WORKDIR}/{wildcards.sample}/qc/html/
         
-        # Explicitly aggregate methylation levels for TssA and Tx
-        {YAME} rowop -o musum {input.cg} | \
-            {YAME} summary -m {CHROMHMM_CM} - > {output.chromhmm_sum}
-
         {PYTHON} {workflow.basedir}/../tools/write_stats_mqc.py \
             --trim-stats       {input.trim_stats} \
             --spatial-counts   {input.spatial_counts} \
-            --chromhmm-summary {output.chromhmm_sum} \
+            --chromhmm-summary {input.chromhmm_sum} \
             --lambda-flagstat  {input.lambda_flagstat} \
             --sample           {wildcards.sample} \
             --output-dir       {WORKDIR}/{wildcards.sample}/qc/table/
@@ -1454,7 +1518,7 @@ rule qc_report:
             --filename multiqc_report.html \
             --force \
             --exclude star \
-            --cl-config "sample_names_replace: {{rna_STAR: {wildcards.sample}}}, table_columns_visible: {{biscuit: {{aligned: false}}}}"
+            --cl-config "{{sample_names_replace: {{rna_STAR: {wildcards.sample}}}, table_columns_visible: {{biscuit: {{aligned: false}}}}}}"
         {PYTHON} {workflow.basedir}/../tools/generate_html_report.py \
             --spatial-counts {input.spatial_counts} \
             --plots-dir      {WORKDIR}/{wildcards.sample}/qc/plots/ \
@@ -1511,6 +1575,7 @@ rule copy_final_sample_outputs:
         cg      = WORKDIR + "/{sample}/pileup/{sample}.cg",
         cg_idx  = WORKDIR + "/{sample}/pileup/{sample}.cg.idx",
         lambda_cg = WORKDIR + "/{sample}/pileup/{sample}_Lambda.cg",
+        lambda_sampling = WORKDIR + "/{sample}/qc/table/{sample}_lambda_pileup_sampling.tsv",
         qc      = WORKDIR + "/{sample}/qc/html/qc_report.html",
         multiqc = WORKDIR + "/{sample}/qc/html/multiqc_report.html",
         multiqc_data = WORKDIR + "/{sample}/qc/html/multiqc_report_data",
@@ -1519,6 +1584,7 @@ rule copy_final_sample_outputs:
         cg      = OUTDIR + "/{sample}/{sample}.cg",
         cg_idx  = OUTDIR + "/{sample}/{sample}.cg.idx",
         lambda_cg = OUTDIR + "/{sample}/{sample}_Lambda.cg",
+        lambda_sampling = OUTDIR + "/{sample}/{sample}_lambda_pileup_sampling.tsv",
         qc      = OUTDIR + "/{sample}/qc_report.html",
         multiqc = OUTDIR + "/{sample}/multiqc_report.html",
         multiqc_data = directory(OUTDIR + "/{sample}/multiqc_report_data"),
@@ -1529,6 +1595,7 @@ rule copy_final_sample_outputs:
         cp {input.cg} {output.cg}
         cp {input.cg_idx} {output.cg_idx}
         cp {input.lambda_cg} {output.lambda_cg}
+        cp {input.lambda_sampling} {output.lambda_sampling}
         cp {input.qc} {output.qc}
         cp {input.multiqc} {output.multiqc}
         cp {input.version} {output.version}

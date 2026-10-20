@@ -1,0 +1,29 @@
+name: spatial-dmt
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - snakemake=9.19.0
+  - snakemake-executor-plugin-cluster-generic=1.0.9
+  - star=2.7.11b
+  - biscuit=1.8
+  - samtools=1.23.1
+  - htslib=1.23.1
+  - bedtools=2.31.1
+  - yame=1.10
+  - bbmap=39.81
+  - pigz=2.8
+  - parallel=20260422
+  - multiqc=1.35
+  - biopython
+  - fuzzysearch
+  - regex
+  - pysam
+  - matplotlib
+  - pandas
+  - gawk
+  - make
+  - pkg-config
+  - c-compiler
+  - zlib=1.3.2

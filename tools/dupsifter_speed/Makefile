@@ -1,6 +1,6 @@
-CC = gcc
+CC ?= cc
 CFLAGS = -W -Wall -finline-functions -fPIC -std=gnu99 -Wno-unused-result -O3
-CLIB = -lz -lm -llzma -lbz2 -lcurl
+CLIB = -lz -lm
 CF_OPTIMIZE = 1
 
 OS := $(shell uname)
@@ -39,18 +39,28 @@ exportcf:
 ##### libraries #####
 #####################
 
-HTSLIB_ROOT ?= /mnt/isilon/zhoulab/labsoftware/samtools/samtools-1.17/htslib-1.17
-LHTSLIB_INCLUDE = $(HTSLIB_ROOT)/htslib
-LHTSLIB = $(HTSLIB_ROOT)/libhts.a
+PKG_CONFIG ?= pkg-config
+HTSLIB_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags htslib 2>/dev/null)
+HTSLIB_LIBS ?= $(shell $(PKG_CONFIG) --libs htslib 2>/dev/null)
+HTSLIB_INCLUDEDIR ?= $(shell $(PKG_CONFIG) --variable=includedir htslib 2>/dev/null)
+HTSLIB_LIBDIR ?= $(shell $(PKG_CONFIG) --variable=libdir htslib 2>/dev/null)
+ifeq ($(strip $(HTSLIB_LIBS)),)
+HTSLIB_LIBS = -lhts
+endif
+ifneq ($(strip $(HTSLIB_LIBDIR)),)
+HTSLIB_LIBS += -Wl,-rpath,$(HTSLIB_LIBDIR)
+endif
+ifneq ($(strip $(HTSLIB_INCLUDEDIR)),)
+HTSLIB_CFLAGS += -I$(HTSLIB_INCLUDEDIR)/htslib
+endif
 
 # Main program
-LIBS = $(LHTSLIB)
-dupsifter: $(LIBS) dupsifter.o
-	$(CC) $(CFLAGS) dupsifter.o -o $@.tmp -I$(LHTSLIB_INCLUDE) $(LIBS) $(CLIB)
+dupsifter: dupsifter.o Makefile
+	$(CC) $(CFLAGS) dupsifter.o -o $@.tmp $(HTSLIB_LIBS) $(CLIB)
 	mv $@.tmp $@
 
-dupsifter.o: dupsifter.c khashl.h refcache.h util.h version.h
-	$(CC) -c $(CFLAGS) dupsifter.c -o $@.tmp -I$(LHTSLIB_INCLUDE)
+dupsifter.o: dupsifter.c khashl.h refcache.h util.h version.h Makefile
+	$(CC) -c $(CFLAGS) $(HTSLIB_CFLAGS) dupsifter.c -o $@.tmp
 	mv $@.tmp $@
 
 # Clean
@@ -59,7 +69,6 @@ clean:
 	rm -f dupsifter dupsifter.tmp dupsifter.o dupsifter.o.tmp
 
 purge: clean
-	make -C $(LHTSLIB_DIR) clean
 
 ## clean to make a release zip
 .PHONY: release

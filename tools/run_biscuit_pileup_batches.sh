@@ -88,15 +88,21 @@ for variable in cell_list bam_dir tmp_pileup output_cg output_index \
         pileup_window_step; do
     [[ -n ${!variable} ]] || die "missing --${variable//_/-}"
 done
-for executable in "$cpg_converter" "$yame" "$planner" "$python"; do
-    [[ -e $executable ]] || die "missing tool: $executable"
-done
-if [[ $biscuit == */* ]]; then
-    [[ -x $biscuit ]] || die "missing BISCUIT executable: $biscuit"
-else
-    biscuit=$(command -v "$biscuit") \
-        || die "BISCUIT executable not found in PATH"
-fi
+resolve_tool() {
+    local tool=$1
+    if [[ $tool == */* ]]; then
+        [[ -e $tool ]] || die "missing tool: $tool"
+        printf '%s\n' "$tool"
+    else
+        command -v "$tool" || die "tool not found in PATH: $tool"
+    fi
+}
+
+cpg_converter=$(resolve_tool "$cpg_converter")
+yame=$(resolve_tool "$yame")
+planner=$(resolve_tool "$planner")
+python=$(resolve_tool "$python")
+biscuit=$(resolve_tool "$biscuit")
 for input in "$cell_list" "$ref_fasta" "$cpg_index"; do
     [[ -s $input ]] || die "missing or empty input: $input"
 done
