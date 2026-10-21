@@ -769,7 +769,6 @@ def load_pipeline_comparison(repo_root: Path) -> tuple[pd.DataFrame, list[dict]]
     path = repo_root / "tools" / "figure2" / "pipeline_comparison.tsv"
     frame = pd.read_csv(path, sep="\t")
     run_root = Path("/scr1/users/suc3/20260528_runNewSpatialPipe")
-    source_summary = repo_root / "tmp.md"
     e65_multiqc = repo_root / "multiqc_smcseq_finished5_data" / "multiqc_curated_metrics.txt"
     reproduced_root = (
         run_root
@@ -813,11 +812,11 @@ def load_pipeline_comparison(repo_root: Path) -> tuple[pd.DataFrame, list[dict]]
             sources = f"{path}; {upstream}"
             definition = "spatialdmt_revised_fragment_summary_v1"
         elif item["pipeline"] == "e65_bsconv":
-            sources = f"{path}; {e65_multiqc}; {source_summary}"
+            sources = f"{path}; {e65_multiqc}"
             definition = "smcseq_bsconv_y005_summary_v1"
         else:
             sources = (
-                f"{path}; {source_summary}; "
+                f"{path}; "
                 f"{reproduced_root / 'original_vs_current.tsv'}; "
                 f"{reproduced_root / 'bismark_xm_filter.tsv'}"
             )

@@ -5,6 +5,8 @@ dev/
 logs
 .codex
 TODO.md
+/tmp.md
+/docs/reproducibility/
 
 # Local agent and project memory
 /AGENTS.md
