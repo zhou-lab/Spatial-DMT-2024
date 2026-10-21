@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.3 - 2026-10-21
+
+- Added pinned URLs and checksums for UCSC hg38/mm10 FASTAs, the NCBI Lambda
+  reference, BISCUIT QC archives, and RNA annotations.
+- Documented complete BISCUIT, CpG BED, Lambda, and STAR reference construction
+  using the directory layout expected by the checked-in profiles.
+- Bundled the exact compact hg38 and mm10 ChromHMM YAME masks used by the
+  validated reports, with row-count and checksum verification instructions.
+- Distinguished assets required by the standard `final_output` target from
+  user-selected feature collections required only by the extended `qc` target.
+- Made no workflow-logic or metric-definition changes.
+
 ## 2.0.2 - 2026-10-20
 
 - Added a fully solved Micromamba environment for the workflow, including
